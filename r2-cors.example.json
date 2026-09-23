@@ -3,15 +3,14 @@
     {
       "allowed": {
         "origins": [
-          "https://social-uploader.YOUR-SUBDOMAIN.workers.dev",
+          "https://social-uploader.nodatlaspour.workers.dev",
           "http://localhost:8787"
         ],
         "methods": ["PUT"],
-        "headers": ["Content-Type"]
+        "headers": ["Content-Type", "Content-Length"]
       },
-      "expose_headers": ["ETag"],
-      "max_age_seconds": 3600
+      "exposeHeaders": ["ETag"],
+      "maxAgeSeconds": 3600
     }
   ]
 }
-

@@ -5,7 +5,6 @@ import {
   VIDEO_CONTENT_TYPES,
   VIDEO_MAX_BYTES,
   type ApiError,
-  type AssetKind,
   type DraftRequest,
   type PresignRequest,
   type PresignResponse,
@@ -61,10 +60,8 @@ form.addEventListener("submit", async (event) => {
 
   try {
     setProgress("Preparing secure uploads…", 4);
-    const [videoUpload, thumbnailUpload] = await Promise.all([
-      requestPresign(jobId, "video", videoFile!),
-      requestPresign(jobId, "thumbnail", thumbnailFile!),
-    ]);
+    const reservation = await requestPresign(jobId, videoFile!, thumbnailFile!);
+    const { video: videoUpload, thumbnail: thumbnailUpload } = reservation.uploads;
 
     setProgress("Uploading files directly to R2…", 8);
     const progress = { video: 0, thumbnail: 0 };
@@ -200,13 +197,22 @@ function validateForm(): boolean {
   return true;
 }
 
-async function requestPresign(jobId: string, kind: AssetKind, file: File): Promise<PresignResponse> {
+async function requestPresign(
+  jobId: string,
+  video: File,
+  thumbnail: File,
+): Promise<PresignResponse> {
   const payload: PresignRequest = {
     jobId,
-    kind,
-    fileName: file.name,
-    contentType: file.type,
-    size: file.size,
+    files: [
+      { kind: "video", fileName: video.name, contentType: video.type, size: video.size },
+      {
+        kind: "thumbnail",
+        fileName: thumbnail.name,
+        contentType: thumbnail.type,
+        size: thumbnail.size,
+      },
+    ],
   };
   return apiRequest<PresignResponse>("/api/uploads/presign", {
     method: "POST",

@@ -6,6 +6,7 @@ import {
   type AssetKind,
   type DraftRequest,
   type PresignRequest,
+  type UploadFileRequest,
 } from "../shared/contracts";
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -26,8 +27,21 @@ export function extensionFor(kind: AssetKind, contentType: string): string | nul
 
 export function validatePresignRequest(value: unknown): PresignRequest | null {
   if (!isRecord(value)) return null;
-  const { jobId, kind, fileName, contentType, size } = value;
+  const { jobId, files } = value;
   if (typeof jobId !== "string" || !UUID_PATTERN.test(jobId)) return null;
+  if (!Array.isArray(files) || files.length !== 2) return null;
+  const validatedFiles = files.map(validateUploadFile);
+  if (validatedFiles.some((file) => file === null)) return null;
+  const safeFiles = validatedFiles as UploadFileRequest[];
+  const kinds = new Set(safeFiles.map((file) => file.kind));
+  if (!kinds.has("video") || !kinds.has("thumbnail")) return null;
+
+  return { jobId, files: safeFiles };
+}
+
+function validateUploadFile(value: unknown): UploadFileRequest | null {
+  if (!isRecord(value)) return null;
+  const { kind, fileName, contentType, size } = value;
   if (kind !== "video" && kind !== "thumbnail") return null;
   if (typeof fileName !== "string" || fileName.length < 1 || fileName.length > 255) return null;
   if (typeof contentType !== "string" || extensionFor(kind, contentType) === null) return null;
@@ -37,7 +51,7 @@ export function validatePresignRequest(value: unknown): PresignRequest | null {
   const maxBytes = kind === "video" ? VIDEO_MAX_BYTES : THUMBNAIL_MAX_BYTES;
   if (!(allowedTypes as readonly string[]).includes(contentType) || size > maxBytes) return null;
 
-  return { jobId, kind, fileName, contentType, size };
+  return { kind, fileName, contentType, size };
 }
 
 export function validateDraftRequest(value: unknown): DraftRequest | null {
@@ -77,4 +91,3 @@ function isAssetInput(value: unknown, jobId: string, kind: AssetKind): boolean {
   if (kind === "thumbnail" && !match[2]?.toLowerCase().startsWith("thumbnail.")) return false;
   return extensionFor(kind, contentType) !== null && size > 0;
 }
-

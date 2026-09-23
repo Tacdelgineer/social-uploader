@@ -16,10 +16,10 @@
     }
   ],
   "vars": {
-    "R2_BUCKET_NAME": "social-uploader"
+    "R2_BUCKET_NAME": "social-uploader",
+    "R2_ACCOUNT_ID": "b562069cd100d1d1db37a706344d214f"
   },
   "observability": {
     "enabled": true
   }
 }
-

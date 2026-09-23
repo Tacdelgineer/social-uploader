@@ -1,5 +1,6 @@
 export const VIDEO_MAX_BYTES = 2 * 1024 * 1024 * 1024;
 export const THUMBNAIL_MAX_BYTES = 10 * 1024 * 1024;
+export const R2_STORAGE_CAP_BYTES = 8_000_000_000;
 
 export const VIDEO_CONTENT_TYPES = ["video/mp4"] as const;
 export const THUMBNAIL_CONTENT_TYPES = ["image/jpeg", "image/png", "image/webp"] as const;
@@ -7,18 +8,31 @@ export const THUMBNAIL_CONTENT_TYPES = ["image/jpeg", "image/png", "image/webp"]
 export type AssetKind = "video" | "thumbnail";
 export type Platform = "youtube" | "instagram" | "tiktok";
 
-export interface PresignRequest {
-  jobId: string;
+export interface UploadFileRequest {
   kind: AssetKind;
   fileName: string;
   contentType: string;
   size: number;
 }
 
-export interface PresignResponse {
+export interface PresignRequest {
+  jobId: string;
+  files: UploadFileRequest[];
+}
+
+export interface PresignedUpload {
   uploadUrl: string;
   objectKey: string;
   expiresIn: number;
+}
+
+export interface PresignResponse {
+  uploads: Record<AssetKind, PresignedUpload>;
+  capacity: {
+    limitBytes: number;
+    committedBytes: number;
+    availableBytes: number;
+  };
 }
 
 export interface DraftAssetInput {
@@ -51,4 +65,3 @@ export interface StoredDraft extends DraftRequest {
 export interface ApiError {
   error: string;
 }
-
