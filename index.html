@@ -1,0 +1,233 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta
+      name="description"
+      content="Upload one short-form video and prepare a cross-platform publishing draft."
+    />
+    <title>Social Uploader</title>
+    <script type="module" src="/src/client/main.ts"></script>
+  </head>
+  <body>
+    <div class="page-shell">
+      <header class="site-header">
+        <a class="brand" href="/" aria-label="Social Uploader home">
+          <span class="brand-mark" aria-hidden="true">S</span>
+          <span>Social Uploader</span>
+        </a>
+        <span class="milestone-pill">Foundation · M1</span>
+      </header>
+
+      <main>
+        <section class="hero" aria-labelledby="page-title">
+          <p class="eyebrow">One upload. Three destinations.</p>
+          <h1 id="page-title">Prepare your next short.</h1>
+          <p class="hero-copy">
+            Upload the source files once, add the shared post details, and save a draft ready
+            for future publishing integrations.
+          </p>
+        </section>
+
+        <form id="draft-form" class="workspace" novalidate>
+          <div class="main-column">
+            <section class="panel" aria-labelledby="media-heading">
+              <div class="section-heading">
+                <div>
+                  <p class="step-label">01 · Media</p>
+                  <h2 id="media-heading">Upload files</h2>
+                </div>
+                <p class="section-hint">MP4 video and one cover image</p>
+              </div>
+
+              <div class="upload-grid">
+                <div
+                  id="video-dropzone"
+                  class="dropzone dropzone-video"
+                  role="button"
+                  tabindex="0"
+                  aria-controls="video-input"
+                >
+                  <input id="video-input" type="file" accept="video/mp4,.mp4" hidden />
+                  <div class="upload-icon" aria-hidden="true">
+                    <svg viewBox="0 0 24 24" focusable="false">
+                      <path d="M12 16V4m0 0L7.5 8.5M12 4l4.5 4.5M5 14v4a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-4" />
+                    </svg>
+                  </div>
+                  <div>
+                    <strong id="video-name">Drop your MP4 here</strong>
+                    <span id="video-meta">or click to choose a file · up to 2 GB</span>
+                  </div>
+                </div>
+
+                <div
+                  id="thumbnail-dropzone"
+                  class="dropzone dropzone-thumbnail"
+                  role="button"
+                  tabindex="0"
+                  aria-controls="thumbnail-input"
+                >
+                  <input
+                    id="thumbnail-input"
+                    type="file"
+                    accept="image/jpeg,image/png,image/webp,.jpg,.jpeg,.png,.webp"
+                    hidden
+                  />
+                  <div id="thumbnail-preview" class="thumbnail-preview" aria-hidden="true">
+                    <svg viewBox="0 0 24 24" focusable="false">
+                      <path d="M4 16l4.5-5 3.5 4 2.5-3 5.5 6H4v-2Zm0-10h16v12H4V6Zm11 3.5h.01" />
+                    </svg>
+                  </div>
+                  <div>
+                    <strong id="thumbnail-name">Choose a thumbnail</strong>
+                    <span id="thumbnail-meta">JPG, PNG, or WebP · up to 10 MB</span>
+                  </div>
+                </div>
+              </div>
+            </section>
+
+            <section class="panel" aria-labelledby="details-heading">
+              <div class="section-heading">
+                <div>
+                  <p class="step-label">02 · Details</p>
+                  <h2 id="details-heading">Shared post details</h2>
+                </div>
+                <p class="section-hint">Used as the default for every platform</p>
+              </div>
+
+              <div class="field-stack">
+                <label class="field">
+                  <span>Default title</span>
+                  <input
+                    id="title"
+                    name="title"
+                    type="text"
+                    maxlength="200"
+                    placeholder="Give your short a clear title"
+                    required
+                  />
+                  <small><span id="title-count">0</span>/200</small>
+                </label>
+
+                <label class="field">
+                  <span>Default description / caption</span>
+                  <textarea
+                    id="description"
+                    name="description"
+                    maxlength="2200"
+                    rows="6"
+                    placeholder="Write a caption, add context, or leave notes for later…"
+                  ></textarea>
+                  <small><span id="description-count">0</span>/2,200</small>
+                </label>
+
+                <label class="field schedule-field">
+                  <span>Scheduled date and time</span>
+                  <input id="scheduled-at" name="scheduledAt" type="datetime-local" />
+                  <small id="timezone-label">Saved in your local time zone</small>
+                </label>
+              </div>
+            </section>
+          </div>
+
+          <aside class="side-column">
+            <section class="panel destinations-panel" aria-labelledby="destinations-heading">
+              <div class="section-heading compact">
+                <div>
+                  <p class="step-label">03 · Destinations</p>
+                  <h2 id="destinations-heading">Choose platforms</h2>
+                </div>
+              </div>
+
+              <div class="platform-list">
+                <details class="platform-card" open>
+                  <summary>
+                    <span class="platform-identity">
+                      <span class="platform-icon youtube" aria-hidden="true">YT</span>
+                      <span><strong>YouTube</strong><small>Shorts</small></span>
+                    </span>
+                    <span class="toggle-wrap" title="Include YouTube">
+                      <input id="youtube-enabled" type="checkbox" checked />
+                      <span class="toggle" aria-hidden="true"></span>
+                    </span>
+                    <span class="chevron" aria-hidden="true"></span>
+                  </summary>
+                  <div class="platform-settings">
+                    <p>Platform-specific settings will appear here in the next milestone.</p>
+                    <button class="connect-button" type="button" data-platform="YouTube">
+                      Connect YouTube
+                    </button>
+                  </div>
+                </details>
+
+                <details class="platform-card">
+                  <summary>
+                    <span class="platform-identity">
+                      <span class="platform-icon instagram" aria-hidden="true">IG</span>
+                      <span><strong>Instagram</strong><small>Reels</small></span>
+                    </span>
+                    <span class="toggle-wrap" title="Include Instagram">
+                      <input id="instagram-enabled" type="checkbox" checked />
+                      <span class="toggle" aria-hidden="true"></span>
+                    </span>
+                    <span class="chevron" aria-hidden="true"></span>
+                  </summary>
+                  <div class="platform-settings">
+                    <p>Platform-specific settings will appear here in the next milestone.</p>
+                    <button class="connect-button" type="button" data-platform="Instagram">
+                      Connect Instagram
+                    </button>
+                  </div>
+                </details>
+
+                <details class="platform-card">
+                  <summary>
+                    <span class="platform-identity">
+                      <span class="platform-icon tiktok" aria-hidden="true">TT</span>
+                      <span><strong>TikTok</strong><small>Video</small></span>
+                    </span>
+                    <span class="toggle-wrap" title="Include TikTok">
+                      <input id="tiktok-enabled" type="checkbox" checked />
+                      <span class="toggle" aria-hidden="true"></span>
+                    </span>
+                    <span class="chevron" aria-hidden="true"></span>
+                  </summary>
+                  <div class="platform-settings">
+                    <p>Platform-specific settings will appear here in the next milestone.</p>
+                    <button class="connect-button" type="button" data-platform="TikTok">
+                      Connect TikTok
+                    </button>
+                  </div>
+                </details>
+              </div>
+            </section>
+
+            <section class="panel submit-panel">
+              <div id="upload-status" class="upload-status" aria-live="polite" hidden>
+                <div class="status-copy">
+                  <span id="status-label">Preparing upload…</span>
+                  <strong id="status-percent">0%</strong>
+                </div>
+                <div class="progress-track" aria-hidden="true">
+                  <span id="progress-bar"></span>
+                </div>
+              </div>
+
+              <button id="save-button" class="primary-button" type="submit">
+                <span>Upload &amp; save draft</span>
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M5 12h14m-5-5 5 5-5 5" />
+                </svg>
+              </button>
+              <p class="submit-note">Files upload directly to private R2 storage.</p>
+            </section>
+          </aside>
+        </form>
+      </main>
+
+      <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+    </div>
+  </body>
+</html>
+
