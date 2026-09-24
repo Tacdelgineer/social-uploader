@@ -93,4 +93,4 @@ No paid Cloudflare product, plan change, or limit increase should be enabled wit
 
 ## Next milestone
 
-Add private dashboard access and real OAuth connection flows, beginning with YouTube. Upload YouTube media immediately, schedule it with YouTube's native scheduling fields, verify acceptance, and delete the R2 transfer objects. Define—but do not yet overbuild—the authenticated mini-PC custody protocol needed by platforms that cannot accept native schedules. Keep publishing disabled until provider permissions, account eligibility, and review requirements are verified.
+Milestone 2 is implemented and documented in [step-02-youtube.md](step-02-youtube.md): private dashboard access, real YouTube OAuth, native scheduling, verification, and immediate temporary-media deletion after acceptance.

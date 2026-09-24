@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta
       name="description"
-      content="Upload one short-form video and prepare a cross-platform publishing draft."
+      content="Upload one short-form video and schedule it natively on YouTube."
     />
     <title>Social Uploader</title>
     <script type="module" src="/src/client/main.ts"></script>
@@ -17,16 +17,16 @@
           <span class="brand-mark" aria-hidden="true">S</span>
           <span>Social Uploader</span>
         </a>
-        <span class="milestone-pill">Foundation · M1</span>
+        <span class="milestone-pill">YouTube - M2</span>
       </header>
 
       <main>
         <section class="hero" aria-labelledby="page-title">
-          <p class="eyebrow">One upload. Three destinations.</p>
-          <h1 id="page-title">Prepare your next short.</h1>
+          <p class="eyebrow">Upload once. Schedule natively.</p>
+          <h1 id="page-title">Schedule your next Short.</h1>
           <p class="hero-copy">
-            Upload the source files once, add the shared post details, and save a draft ready
-            for future publishing integrations.
+            Stage the source files temporarily, send the video directly to YouTube, verify the
+            schedule, and remove the transfer copy.
           </p>
         </section>
 
@@ -35,10 +35,10 @@
             <section class="panel" aria-labelledby="media-heading">
               <div class="section-heading">
                 <div>
-                  <p class="step-label">01 · Media</p>
-                  <h2 id="media-heading">Upload files</h2>
+                  <p class="step-label">01 - Media</p>
+                  <h2 id="media-heading">Choose files</h2>
                 </div>
-                <p class="section-hint">MP4 video and one cover image</p>
+                <p class="section-hint">MP4 video and a JPG or PNG cover</p>
               </div>
 
               <div class="upload-grid">
@@ -57,7 +57,7 @@
                   </div>
                   <div>
                     <strong id="video-name">Drop your MP4 here</strong>
-                    <span id="video-meta">or click to choose a file · up to 2 GB</span>
+                    <span id="video-meta">or click to choose a file - up to 2 GB</span>
                   </div>
                 </div>
 
@@ -68,12 +68,7 @@
                   tabindex="0"
                   aria-controls="thumbnail-input"
                 >
-                  <input
-                    id="thumbnail-input"
-                    type="file"
-                    accept="image/jpeg,image/png,image/webp,.jpg,.jpeg,.png,.webp"
-                    hidden
-                  />
+                  <input id="thumbnail-input" type="file" accept="image/jpeg,image/png,.jpg,.jpeg,.png" hidden />
                   <div id="thumbnail-preview" class="thumbnail-preview" aria-hidden="true">
                     <svg viewBox="0 0 24 24" focusable="false">
                       <path d="M4 16l4.5-5 3.5 4 2.5-3 5.5 6H4v-2Zm0-10h16v12H4V6Zm11 3.5h.01" />
@@ -81,7 +76,7 @@
                   </div>
                   <div>
                     <strong id="thumbnail-name">Choose a thumbnail</strong>
-                    <span id="thumbnail-meta">JPG, PNG, or WebP · up to 10 MB</span>
+                    <span id="thumbnail-meta">JPG or PNG - up to 10 MB</span>
                   </div>
                 </div>
               </div>
@@ -90,42 +85,42 @@
             <section class="panel" aria-labelledby="details-heading">
               <div class="section-heading">
                 <div>
-                  <p class="step-label">02 · Details</p>
-                  <h2 id="details-heading">Shared post details</h2>
+                  <p class="step-label">02 - Details</p>
+                  <h2 id="details-heading">YouTube details</h2>
                 </div>
-                <p class="section-hint">Used as the default for every platform</p>
+                <p class="section-hint">Applied to the scheduled upload</p>
               </div>
 
               <div class="field-stack">
                 <label class="field">
-                  <span>Default title</span>
+                  <span>Title</span>
                   <input
                     id="title"
                     name="title"
                     type="text"
-                    maxlength="200"
-                    placeholder="Give your short a clear title"
+                    maxlength="100"
+                    placeholder="Give your Short a clear title"
                     required
                   />
-                  <small><span id="title-count">0</span>/200</small>
+                  <small><span id="title-count">0</span>/100</small>
                 </label>
 
                 <label class="field">
-                  <span>Default description / caption</span>
+                  <span>Description</span>
                   <textarea
                     id="description"
                     name="description"
                     maxlength="2200"
                     rows="6"
-                    placeholder="Write a caption, add context, or leave notes for later…"
+                    placeholder="Write a description or add context..."
                   ></textarea>
                   <small><span id="description-count">0</span>/2,200</small>
                 </label>
 
                 <label class="field schedule-field">
-                  <span>Scheduled date and time</span>
-                  <input id="scheduled-at" name="scheduledAt" type="datetime-local" />
-                  <small id="timezone-label">Saved in your local time zone</small>
+                  <span>Publish date and time</span>
+                  <input id="scheduled-at" name="scheduledAt" type="datetime-local" required />
+                  <small id="timezone-label">Scheduled in your local time zone</small>
                 </label>
               </div>
             </section>
@@ -135,8 +130,8 @@
             <section class="panel destinations-panel" aria-labelledby="destinations-heading">
               <div class="section-heading compact">
                 <div>
-                  <p class="step-label">03 · Destinations</p>
-                  <h2 id="destinations-heading">Choose platforms</h2>
+                  <p class="step-label">03 - Destination</p>
+                  <h2 id="destinations-heading">Choose platform</h2>
                 </div>
               </div>
 
@@ -145,7 +140,7 @@
                   <summary>
                     <span class="platform-identity">
                       <span class="platform-icon youtube" aria-hidden="true">YT</span>
-                      <span><strong>YouTube</strong><small>Shorts</small></span>
+                      <span><strong>YouTube</strong><small id="youtube-connection-label">Checking connection...</small></span>
                     </span>
                     <span class="toggle-wrap" title="Include YouTube">
                       <input id="youtube-enabled" type="checkbox" checked />
@@ -153,51 +148,61 @@
                     </span>
                     <span class="chevron" aria-hidden="true"></span>
                   </summary>
-                  <div class="platform-settings">
-                    <p>Platform-specific settings will appear here in the next milestone.</p>
-                    <button class="connect-button" type="button" data-platform="YouTube">
-                      Connect YouTube
-                    </button>
+                  <div class="platform-settings youtube-settings">
+                    <div class="connection-actions">
+                      <button id="youtube-connect" class="connect-button" type="button">Connect YouTube</button>
+                      <button id="youtube-disconnect" class="text-button" type="button" hidden>Disconnect</button>
+                    </div>
+                    <label class="mini-field">
+                      <span>Visibility</span>
+                      <select id="youtube-visibility">
+                        <option value="public">Public at scheduled time</option>
+                      </select>
+                    </label>
+                    <label class="mini-field">
+                      <span>Made for kids</span>
+                      <select id="youtube-made-for-kids">
+                        <option value="false">No, it is not made for kids</option>
+                        <option value="true">Yes, it is made for kids</option>
+                      </select>
+                    </label>
+                    <p class="settings-note">YouTube keeps the upload private until the scheduled publish time.</p>
                   </div>
                 </details>
 
-                <details class="platform-card">
+                <details class="platform-card is-placeholder">
                   <summary>
                     <span class="platform-identity">
                       <span class="platform-icon instagram" aria-hidden="true">IG</span>
-                      <span><strong>Instagram</strong><small>Reels</small></span>
+                      <span><strong>Instagram</strong><small>Placeholder only</small></span>
                     </span>
-                    <span class="toggle-wrap" title="Include Instagram">
-                      <input id="instagram-enabled" type="checkbox" checked />
+                    <span class="toggle-wrap" title="Instagram is not available in this milestone">
+                      <input id="instagram-enabled" type="checkbox" disabled />
                       <span class="toggle" aria-hidden="true"></span>
                     </span>
                     <span class="chevron" aria-hidden="true"></span>
                   </summary>
                   <div class="platform-settings">
-                    <p>Platform-specific settings will appear here in the next milestone.</p>
-                    <button class="connect-button" type="button" data-platform="Instagram">
-                      Connect Instagram
-                    </button>
+                    <p>Connection and publishing are intentionally not implemented yet.</p>
+                    <button class="connect-button" type="button" data-placeholder="Instagram">Connect Instagram</button>
                   </div>
                 </details>
 
-                <details class="platform-card">
+                <details class="platform-card is-placeholder">
                   <summary>
                     <span class="platform-identity">
                       <span class="platform-icon tiktok" aria-hidden="true">TT</span>
-                      <span><strong>TikTok</strong><small>Video</small></span>
+                      <span><strong>TikTok</strong><small>Placeholder only</small></span>
                     </span>
-                    <span class="toggle-wrap" title="Include TikTok">
-                      <input id="tiktok-enabled" type="checkbox" checked />
+                    <span class="toggle-wrap" title="TikTok is not available in this milestone">
+                      <input id="tiktok-enabled" type="checkbox" disabled />
                       <span class="toggle" aria-hidden="true"></span>
                     </span>
                     <span class="chevron" aria-hidden="true"></span>
                   </summary>
                   <div class="platform-settings">
-                    <p>Platform-specific settings will appear here in the next milestone.</p>
-                    <button class="connect-button" type="button" data-platform="TikTok">
-                      Connect TikTok
-                    </button>
+                    <p>Connection and publishing are intentionally not implemented yet.</p>
+                    <button class="connect-button" type="button" data-placeholder="TikTok">Connect TikTok</button>
                   </div>
                 </details>
               </div>
@@ -206,21 +211,17 @@
             <section class="panel submit-panel">
               <div id="upload-status" class="upload-status" aria-live="polite" hidden>
                 <div class="status-copy">
-                  <span id="status-label">Preparing upload…</span>
+                  <span id="status-label">Preparing upload...</span>
                   <strong id="status-percent">0%</strong>
                 </div>
-                <div class="progress-track" aria-hidden="true">
-                  <span id="progress-bar"></span>
-                </div>
+                <div class="progress-track" aria-hidden="true"><span id="progress-bar"></span></div>
               </div>
 
               <button id="save-button" class="primary-button" type="submit">
-                <span>Upload &amp; save draft</span>
-                <svg viewBox="0 0 24 24" aria-hidden="true">
-                  <path d="M5 12h14m-5-5 5 5-5 5" />
-                </svg>
+                <span>Upload &amp; schedule</span>
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14m-5-5 5 5-5 5" /></svg>
               </button>
-              <p class="submit-note">Temporary R2 transfer · 8 GB cap · automatic 7-day cleanup.</p>
+              <p class="submit-note">8 GB hard R2 cap - deleted after YouTube verifies - 7-day fallback cleanup.</p>
             </section>
           </aside>
         </form>

@@ -4,6 +4,7 @@ export const R2_STORAGE_CAP_BYTES = 8_000_000_000;
 
 export const VIDEO_CONTENT_TYPES = ["video/mp4"] as const;
 export const THUMBNAIL_CONTENT_TYPES = ["image/jpeg", "image/png", "image/webp"] as const;
+export const YOUTUBE_THUMBNAIL_CONTENT_TYPES = ["image/jpeg", "image/png"] as const;
 
 export type AssetKind = "video" | "thumbnail";
 export type Platform = "youtube" | "instagram" | "tiktok";
@@ -42,6 +43,11 @@ export interface DraftAssetInput {
   size: number;
 }
 
+export interface YouTubeSettings {
+  visibility: "public";
+  madeForKids: boolean;
+}
+
 export interface DraftRequest {
   id: string;
   title: string;
@@ -49,17 +55,51 @@ export interface DraftRequest {
   scheduledAt: string | null;
   timezone: string;
   platforms: Record<Platform, boolean>;
+  youtube: YouTubeSettings;
   assets: {
     video: DraftAssetInput;
     thumbnail: DraftAssetInput;
   };
 }
 
-export interface StoredDraft extends DraftRequest {
-  schemaVersion: 1;
-  status: "draft";
+export interface StoredJob extends DraftRequest {
+  schemaVersion: 2;
+  status: "uploading_to_youtube" | "scheduled_on_youtube";
   createdAt: string;
   updatedAt: string;
+  youtubeResult?: {
+    videoId: string;
+    acceptedAt: string;
+    uploadStatus: string;
+    privacyStatus: "private";
+    publishAt: string;
+    thumbnailApplied: true;
+  };
+}
+
+export interface CreateJobResponse {
+  id: string;
+  status: "uploading_to_youtube";
+  youtube: {
+    uploadUrl: string;
+    accessToken: string;
+  };
+}
+
+export interface CompleteYouTubeRequest {
+  videoId: string;
+}
+
+export interface CompleteYouTubeResponse {
+  id: string;
+  status: "scheduled_on_youtube";
+  videoId: string;
+  publishAt: string;
+  mediaDeleted: true;
+}
+
+export interface YouTubeConnectionStatus {
+  connected: boolean;
 }
 
 export interface ApiError {

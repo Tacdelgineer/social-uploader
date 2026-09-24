@@ -3,10 +3,13 @@ import { R2_STORAGE_CAP_BYTES } from "../shared/contracts";
 import type {
   ApiError,
   AssetKind,
+  CompleteYouTubeRequest,
+  CompleteYouTubeResponse,
+  CreateJobResponse,
   DraftRequest,
   PresignedUpload,
   PresignResponse,
-  StoredDraft,
+  StoredJob,
   UploadFileRequest,
 } from "../shared/contracts";
 import {
@@ -14,52 +17,80 @@ import {
   DuplicateJobError,
   reserveUploadCapacity,
 } from "./capacity";
+import type { Env } from "./env";
+import {
+  beginYouTubeOAuth,
+  disconnectYouTube,
+  finishYouTubeOAuth,
+  getYouTubeAccessToken,
+  youtubeConnectionStatus,
+} from "./oauth";
 import { extensionFor, validateDraftRequest, validatePresignRequest } from "./validation";
-
-interface Env {
-  ASSETS: Fetcher;
-  UPLOADS: R2Bucket;
-  R2_ACCOUNT_ID: string;
-  R2_ACCESS_KEY_ID: string;
-  R2_SECRET_ACCESS_KEY: string;
-  R2_BUCKET_NAME: string;
-}
+import { setYouTubeThumbnail, startYouTubeUpload, verifyYouTubeSchedule } from "./youtube";
 
 const JSON_HEADERS = {
   "content-type": "application/json; charset=utf-8",
   "cache-control": "no-store",
   "x-content-type-options": "nosniff",
 };
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const YOUTUBE_VIDEO_ID_PATTERN = /^[A-Za-z0-9_-]{6,32}$/u;
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
-    const url = new URL(request.url);
-
-    if (url.pathname === "/api/health" && request.method === "GET") {
-      return json({
-        ok: true,
-        service: "social-uploader",
-        storage: "temporary-r2",
-        storageCapBytes: R2_STORAGE_CAP_BYTES,
-        cleanupFallbackDays: 7,
-      });
+    try {
+      return await route(request, env);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Unexpected server error.";
+      return json({ error: message } satisfies ApiError, 500);
     }
-
-    if (url.pathname === "/api/uploads/presign" && request.method === "POST") {
-      return createPresignedUpload(request, env);
-    }
-
-    if (url.pathname === "/api/drafts" && request.method === "POST") {
-      return createDraft(request, env);
-    }
-
-    if (url.pathname.startsWith("/api/")) {
-      return json({ error: "Not found." } satisfies ApiError, 404);
-    }
-
-    return env.ASSETS.fetch(request);
   },
 } satisfies ExportedHandler<Env>;
+
+async function route(request: Request, env: Env): Promise<Response> {
+  const url = new URL(request.url);
+
+  if (url.pathname === "/api/health" && request.method === "GET") {
+    return json({
+      ok: true,
+      service: "social-uploader",
+      milestone: 2,
+      storage: "temporary-r2-and-kv-metadata",
+      storageCapBytes: R2_STORAGE_CAP_BYTES,
+      cleanupFallbackDays: 7,
+    });
+  }
+
+  if (url.pathname === "/api/oauth/youtube/start" && request.method === "GET") {
+    return beginYouTubeOAuth(env);
+  }
+  if (url.pathname === "/api/oauth/youtube/callback" && request.method === "GET") {
+    return finishYouTubeOAuth(request, env);
+  }
+  if (url.pathname === "/api/oauth/youtube/status" && request.method === "GET") {
+    return json(await youtubeConnectionStatus(env));
+  }
+  if (url.pathname === "/api/oauth/youtube/disconnect" && request.method === "POST") {
+    await disconnectYouTube(env);
+    return json({ disconnected: true });
+  }
+  if (url.pathname === "/api/uploads/presign" && request.method === "POST") {
+    return createPresignedUpload(request, env);
+  }
+  if (url.pathname === "/api/jobs" && request.method === "POST") {
+    return createJob(request, env);
+  }
+
+  const completionMatch = /^\/api\/jobs\/([^/]+)\/youtube\/complete$/u.exec(url.pathname);
+  if (completionMatch && request.method === "POST") {
+    return completeYouTubeUpload(request, env, completionMatch[1] ?? "");
+  }
+
+  if (url.pathname.startsWith("/api/")) {
+    return json({ error: "Not found." } satisfies ApiError, 404);
+  }
+  return env.ASSETS.fetch(request);
+}
 
 async function createPresignedUpload(request: Request, env: Env): Promise<Response> {
   const body = await readJson(request);
@@ -144,30 +175,94 @@ function objectKeyFor(jobId: string, file: UploadFileRequest): string {
   return `uploads/${jobId}/${file.kind}.${extensionFor(file.kind, file.contentType)}`;
 }
 
-async function createDraft(request: Request, env: Env): Promise<Response> {
+async function createJob(request: Request, env: Env): Promise<Response> {
   const body = await readJson(request);
   const input = validateDraftRequest(body);
-  if (!input) return json({ error: "Invalid draft." } satisfies ApiError, 400);
+  if (!input) {
+    return json(
+      { error: "Invalid job. Use a future publish time, YouTube only, and a JPG or PNG thumbnail." } satisfies ApiError,
+      400,
+    );
+  }
 
   const assetError = await verifyAssets(input, env.UPLOADS);
   if (assetError) return json({ error: assetError } satisfies ApiError, 409);
+  if (await env.METADATA.get(jobKey(input.id))) {
+    return json({ error: "A job with this ID already exists." } satisfies ApiError, 409);
+  }
 
+  const accessToken = await getYouTubeAccessToken(env);
+  const uploadUrl = await startYouTubeUpload(input, accessToken);
   const now = new Date().toISOString();
-  const draft: StoredDraft = {
+  const job: StoredJob = {
     ...input,
     title: input.title.trim(),
-    schemaVersion: 1,
-    status: "draft",
+    schemaVersion: 2,
+    status: "uploading_to_youtube",
     createdAt: now,
     updatedAt: now,
   };
+  await env.METADATA.put(jobKey(input.id), JSON.stringify(job));
 
-  await env.UPLOADS.put(`drafts/${input.id}.json`, JSON.stringify(draft, null, 2), {
-    httpMetadata: { contentType: "application/json" },
-    customMetadata: { status: "draft", scheduledAt: input.scheduledAt ?? "" },
-  });
+  return json({
+    id: job.id,
+    status: "uploading_to_youtube",
+    youtube: { uploadUrl, accessToken },
+  } satisfies CreateJobResponse, 201);
+}
 
-  return json({ id: draft.id, status: draft.status, createdAt: draft.createdAt }, 201);
+async function completeYouTubeUpload(request: Request, env: Env, jobId: string): Promise<Response> {
+  if (!UUID_PATTERN.test(jobId)) return json({ error: "Invalid job ID." } satisfies ApiError, 400);
+  const body = (await readJson(request)) as Partial<CompleteYouTubeRequest> | null;
+  if (!body || typeof body.videoId !== "string" || !YOUTUBE_VIDEO_ID_PATTERN.test(body.videoId)) {
+    return json({ error: "Invalid YouTube video ID." } satisfies ApiError, 400);
+  }
+
+  const job = await env.METADATA.get<StoredJob>(jobKey(jobId), "json");
+  if (!job) return json({ error: "Job not found." } satisfies ApiError, 404);
+  if (job.status === "scheduled_on_youtube" && job.youtubeResult) {
+    return json({
+      id: job.id,
+      status: "scheduled_on_youtube",
+      videoId: job.youtubeResult.videoId,
+      publishAt: job.youtubeResult.publishAt,
+      mediaDeleted: true,
+    } satisfies CompleteYouTubeResponse);
+  }
+
+  const thumbnail = await env.UPLOADS.get(job.assets.thumbnail.key);
+  if (!thumbnail || thumbnail.size !== job.assets.thumbnail.size) {
+    return json({ error: "The temporary thumbnail is missing or changed." } satisfies ApiError, 409);
+  }
+
+  const accessToken = await getYouTubeAccessToken(env);
+  await setYouTubeThumbnail(body.videoId, thumbnail, job.assets.thumbnail.contentType, accessToken);
+  const accepted = await verifyYouTubeSchedule(body.videoId, job, accessToken);
+
+  await env.UPLOADS.delete([job.assets.video.key, job.assets.thumbnail.key]);
+  const acceptedAt = new Date().toISOString();
+  const completed: StoredJob = {
+    ...job,
+    status: "scheduled_on_youtube",
+    updatedAt: acceptedAt,
+    youtubeResult: {
+      videoId: accepted.videoId,
+      acceptedAt,
+      uploadStatus: accepted.uploadStatus,
+      privacyStatus: "private",
+      publishAt: accepted.publishAt,
+      thumbnailApplied: true,
+    },
+  };
+  await env.METADATA.put(jobKey(job.id), JSON.stringify(completed));
+
+  return json({
+    id: job.id,
+    status: "scheduled_on_youtube",
+    videoId: accepted.videoId,
+    publishAt: accepted.publishAt,
+    mediaDeleted: true,
+  } satisfies CompleteYouTubeResponse);
 }
 
 async function verifyAssets(input: DraftRequest, bucket: R2Bucket): Promise<string | null> {
@@ -175,9 +270,9 @@ async function verifyAssets(input: DraftRequest, bucket: R2Bucket): Promise<stri
     bucket.head(input.assets.video.key),
     bucket.head(input.assets.thumbnail.key),
   ]);
-  if (!video || !thumbnail) return "Upload both files before saving the draft.";
+  if (!video || !thumbnail) return "Upload both files before creating the job.";
   if (video.size !== input.assets.video.size || thumbnail.size !== input.assets.thumbnail.size) {
-    return "An uploaded file size did not match the draft.";
+    return "An uploaded file size did not match the job.";
   }
   return null;
 }
@@ -190,6 +285,10 @@ async function readJson(request: Request): Promise<unknown> {
   } catch {
     return null;
   }
+}
+
+function jobKey(jobId: string): string {
+  return `job:${jobId}`;
 }
 
 function json(body: unknown, status = 200): Response {

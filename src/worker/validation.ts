@@ -3,6 +3,7 @@ import {
   THUMBNAIL_MAX_BYTES,
   VIDEO_CONTENT_TYPES,
   VIDEO_MAX_BYTES,
+  YOUTUBE_THUMBNAIL_CONTENT_TYPES,
   type AssetKind,
   type DraftRequest,
   type PresignRequest,
@@ -54,16 +55,32 @@ function validateUploadFile(value: unknown): UploadFileRequest | null {
   return { kind, fileName, contentType, size };
 }
 
-export function validateDraftRequest(value: unknown): DraftRequest | null {
+export function validateDraftRequest(value: unknown, now = new Date()): DraftRequest | null {
   if (!isRecord(value)) return null;
-  const { id, title, description, scheduledAt, timezone, platforms, assets } = value;
+  const { id, title, description, scheduledAt, timezone, platforms, youtube, assets } = value;
   if (typeof id !== "string" || !UUID_PATTERN.test(id)) return null;
-  if (typeof title !== "string" || title.trim().length < 1 || title.length > 200) return null;
+  if (typeof title !== "string" || title.trim().length < 1 || title.length > 100) return null;
   if (typeof description !== "string" || description.length > 2200) return null;
-  if (scheduledAt !== null && (typeof scheduledAt !== "string" || !isValidIsoDate(scheduledAt))) return null;
+  if (
+    typeof scheduledAt !== "string" ||
+    !isValidIsoDate(scheduledAt) ||
+    new Date(scheduledAt).getTime() <= now.getTime() + 60_000
+  ) {
+    return null;
+  }
   if (typeof timezone !== "string" || !TIMEZONE_PATTERN.test(timezone)) return null;
-  if (!isRecord(platforms) || !isPlatformRecord(platforms)) return null;
+  if (!isRecord(platforms) || !isYouTubeOnlyPlatformRecord(platforms)) return null;
+  if (!isRecord(youtube) || youtube.visibility !== "public" || typeof youtube.madeForKids !== "boolean") {
+    return null;
+  }
   if (!isRecord(assets) || !isAssetInput(assets.video, id, "video") || !isAssetInput(assets.thumbnail, id, "thumbnail")) {
+    return null;
+  }
+  if (
+    !isRecord(assets.thumbnail) ||
+    typeof assets.thumbnail.contentType !== "string" ||
+    !(YOUTUBE_THUMBNAIL_CONTENT_TYPES as readonly string[]).includes(assets.thumbnail.contentType)
+  ) {
     return null;
   }
 
@@ -75,9 +92,8 @@ function isValidIsoDate(value: string): boolean {
   return !Number.isNaN(parsed.getTime()) && parsed.toISOString() === value;
 }
 
-function isPlatformRecord(value: Record<string, unknown>): boolean {
-  const keys = ["youtube", "instagram", "tiktok"];
-  return keys.every((key) => typeof value[key] === "boolean") && keys.some((key) => value[key] === true);
+function isYouTubeOnlyPlatformRecord(value: Record<string, unknown>): boolean {
+  return value.youtube === true && value.instagram === false && value.tiktok === false;
 }
 
 function isAssetInput(value: unknown, jobId: string, kind: AssetKind): boolean {

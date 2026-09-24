@@ -1,10 +1,10 @@
 # Social Uploader
 
-A deliberately small Cloudflare dashboard for uploading one short-form video and saving a cross-platform publishing draft.
+A deliberately small, private Cloudflare dashboard for uploading one short-form video and scheduling it natively on YouTube.
 
-Milestone 1 includes capped temporary direct-to-R2 transfers, seven-day automatic cleanup, shared metadata, platform toggles, and OAuth placeholders. R2 is not the long-term home for scheduled media, and nothing is published or scheduled yet.
+Milestone 2 adds real Google OAuth, encrypted token storage in Workers KV, direct browser-to-YouTube video upload, YouTube-native scheduling, custom thumbnails, acceptance verification, and immediate R2 media deletion after success. Instagram and TikTok remain honest placeholders.
 
-See [docs/step-01-foundation.md](docs/step-01-foundation.md) for architecture, setup, acceptance criteria, limitations, and the next milestone.
+See [docs/step-02-youtube.md](docs/step-02-youtube.md) for architecture, setup, acceptance criteria, limitations, and the next milestone. The original foundation is documented in [docs/step-01-foundation.md](docs/step-01-foundation.md).
 
 ```sh
 npm install

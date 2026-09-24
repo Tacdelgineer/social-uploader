@@ -68,11 +68,9 @@ describe("capacity accounting", () => {
     cleanupAt: "2026-09-30T00:00:00.000Z",
   };
 
-  it("counts only bytes not yet materialized in R2 plus draft headroom", () => {
+  it("counts only bytes not yet materialized in R2 plus short-lived ledger headroom", () => {
     const sizes = new Map([[`uploads/${id}/video.mp4`, 700]]);
     expect(calculateOutstandingBytes(activeEntry, sizes, new Date("2026-09-23T00:05:00.000Z"))).toBe(400);
-    sizes.set(`drafts/${id}.json`, 50);
-    expect(calculateOutstandingBytes(activeEntry, sizes, new Date("2026-09-23T00:05:00.000Z"))).toBe(300);
   });
 
   it("releases unused reservations when signed URLs expire", () => {
@@ -89,26 +87,56 @@ describe("draft validation", () => {
     description: "Caption",
     scheduledAt: "2026-10-01T19:30:00.000Z",
     timezone: "America/Los_Angeles",
-    platforms: { youtube: true, instagram: false, tiktok: true },
+    platforms: { youtube: true, instagram: false, tiktok: false },
+    youtube: { visibility: "public", madeForKids: false },
     assets: {
       video: { key: `uploads/${id}/video.mp4`, originalName: "short.mp4", contentType: "video/mp4", size: 123 },
-      thumbnail: { key: `uploads/${id}/thumbnail.webp`, originalName: "cover.webp", contentType: "image/webp", size: 45 },
+      thumbnail: { key: `uploads/${id}/thumbnail.png`, originalName: "cover.png", contentType: "image/png", size: 45 },
     },
   };
 
   it("accepts a valid draft", () => {
-    expect(validateDraftRequest(validDraft)).not.toBeNull();
+    expect(validateDraftRequest(validDraft, new Date("2026-09-23T00:00:00.000Z"))).not.toBeNull();
   });
 
-  it("requires one platform and job-scoped asset keys", () => {
+  it("requires YouTube only and job-scoped asset keys", () => {
     expect(
-      validateDraftRequest({ ...validDraft, platforms: { youtube: false, instagram: false, tiktok: false } }),
+      validateDraftRequest(
+        { ...validDraft, platforms: { youtube: false, instagram: false, tiktok: false } },
+        new Date("2026-09-23T00:00:00.000Z"),
+      ),
     ).toBeNull();
     expect(
       validateDraftRequest({
         ...validDraft,
         assets: { ...validDraft.assets, video: { ...validDraft.assets.video, key: "uploads/other/video.mp4" } },
-      }),
+      }, new Date("2026-09-23T00:00:00.000Z")),
+    ).toBeNull();
+  });
+
+  it("requires a future native schedule and YouTube-compatible thumbnail", () => {
+    expect(
+      validateDraftRequest(
+        { ...validDraft, scheduledAt: "2026-09-22T23:00:00.000Z" },
+        new Date("2026-09-23T00:00:00.000Z"),
+      ),
+    ).toBeNull();
+    expect(
+      validateDraftRequest(
+        {
+          ...validDraft,
+          assets: {
+            ...validDraft.assets,
+            thumbnail: {
+              key: `uploads/${id}/thumbnail.webp`,
+              originalName: "cover.webp",
+              contentType: "image/webp",
+              size: 45,
+            },
+          },
+        },
+        new Date("2026-09-23T00:00:00.000Z"),
+      ),
     ).toBeNull();
   });
 });
