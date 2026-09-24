@@ -7,6 +7,7 @@ import type {
   CompleteYouTubeResponse,
   CreateJobResponse,
   DraftRequest,
+  JobStateUpdateRequest,
   PresignedUpload,
   PresignResponse,
   StoredJob,
@@ -18,6 +19,7 @@ import {
   reserveUploadCapacity,
 } from "./capacity";
 import type { Env } from "./env";
+import { recordAppEvent } from "./events";
 import {
   beginYouTubeOAuth,
   disconnectYouTube,
@@ -25,6 +27,7 @@ import {
   getYouTubeAccessToken,
   youtubeConnectionStatus,
 } from "./oauth";
+import { getSystemStatus } from "./system-status";
 import { extensionFor, validateDraftRequest, validatePresignRequest } from "./validation";
 import { setYouTubeThumbnail, startYouTubeUpload, verifyYouTubeSchedule } from "./youtube";
 
@@ -41,7 +44,10 @@ export default {
     try {
       return await route(request, env);
     } catch (error) {
-      const message = error instanceof Error ? error.message : "Unexpected server error.";
+      const message = errorMessage(error);
+      if (new URL(request.url).pathname.startsWith("/api/")) {
+        await recordAppEvent(env, { level: "error", category: "system", message });
+      }
       return json({ error: message } satisfies ApiError, 500);
     }
   },
@@ -60,7 +66,9 @@ async function route(request: Request, env: Env): Promise<Response> {
       cleanupFallbackDays: 7,
     });
   }
-
+  if (url.pathname === "/api/system/status" && request.method === "GET") {
+    return json(await getSystemStatus(env));
+  }
   if (url.pathname === "/api/oauth/youtube/start" && request.method === "GET") {
     return beginYouTubeOAuth(env);
   }
@@ -72,6 +80,12 @@ async function route(request: Request, env: Env): Promise<Response> {
   }
   if (url.pathname === "/api/oauth/youtube/disconnect" && request.method === "POST") {
     await disconnectYouTube(env);
+    await recordAppEvent(env, {
+      level: "info",
+      category: "oauth",
+      platform: "youtube",
+      message: "YouTube disconnected.",
+    });
     return json({ disconnected: true });
   }
   if (url.pathname === "/api/uploads/presign" && request.method === "POST") {
@@ -79,6 +93,12 @@ async function route(request: Request, env: Env): Promise<Response> {
   }
   if (url.pathname === "/api/jobs" && request.method === "POST") {
     return createJob(request, env);
+  }
+
+  const jobMatch = /^\/api\/jobs\/([^/]+)$/u.exec(url.pathname);
+  if (jobMatch && request.method === "GET") return getJob(env, jobMatch[1] ?? "");
+  if (jobMatch && request.method === "POST") {
+    return updateJobState(request, env, jobMatch[1] ?? "");
   }
 
   const completionMatch = /^\/api\/jobs\/([^/]+)\/youtube\/complete$/u.exec(url.pathname);
@@ -197,18 +217,59 @@ async function createJob(request: Request, env: Env): Promise<Response> {
   const job: StoredJob = {
     ...input,
     title: input.title.trim(),
-    schemaVersion: 2,
-    status: "uploading_to_youtube",
+    schemaVersion: 3,
+    status: "uploading",
     createdAt: now,
     updatedAt: now,
   };
-  await env.METADATA.put(jobKey(input.id), JSON.stringify(job));
+  await putJobWithRetry(env, job);
+  await recordAppEvent(env, {
+    level: "info",
+    category: "upload",
+    platform: "youtube",
+    jobId: job.id,
+    message: "YouTube upload session created; browser upload started.",
+  });
 
   return json({
     id: job.id,
-    status: "uploading_to_youtube",
+    status: "uploading",
     youtube: { uploadUrl, accessToken },
   } satisfies CreateJobResponse, 201);
+}
+
+async function getJob(env: Env, jobId: string): Promise<Response> {
+  if (!UUID_PATTERN.test(jobId)) return json({ error: "Invalid job ID." } satisfies ApiError, 400);
+  const job = await env.METADATA.get<StoredJob>(jobKey(jobId), "json");
+  return job ? json(job) : json({ error: "Job not found." } satisfies ApiError, 404);
+}
+
+async function updateJobState(request: Request, env: Env, jobId: string): Promise<Response> {
+  if (!UUID_PATTERN.test(jobId)) return json({ error: "Invalid job ID." } satisfies ApiError, 400);
+  const body = (await readJson(request)) as Partial<JobStateUpdateRequest> | null;
+  if (!body || !["failed", "cancelled"].includes(body.status ?? "")) {
+    return json({ error: "Invalid job state." } satisfies ApiError, 400);
+  }
+  const job = await env.METADATA.get<StoredJob>(jobKey(jobId), "json");
+  if (!job) return json({ error: "Job not found." } satisfies ApiError, 404);
+  if (["scheduled", "scheduled_on_youtube"].includes(job.status)) return json(job);
+
+  const status = body.status as JobStateUpdateRequest["status"];
+  const updated: StoredJob = {
+    ...job,
+    status,
+    updatedAt: new Date().toISOString(),
+    lastError: body.error?.slice(0, 500),
+  };
+  await putJobWithRetry(env, updated);
+  await recordAppEvent(env, {
+    level: status === "failed" ? "error" : "warning",
+    category: "upload",
+    platform: "youtube",
+    jobId,
+    message: status === "failed" ? updated.lastError ?? "Upload failed." : "Upload cancelled by user.",
+  });
+  return json(updated);
 }
 
 async function completeYouTubeUpload(request: Request, env: Env, jobId: string): Promise<Response> {
@@ -220,49 +281,132 @@ async function completeYouTubeUpload(request: Request, env: Env, jobId: string):
 
   const job = await env.METADATA.get<StoredJob>(jobKey(jobId), "json");
   if (!job) return json({ error: "Job not found." } satisfies ApiError, 404);
-  if (job.status === "scheduled_on_youtube" && job.youtubeResult) {
-    return json({
-      id: job.id,
-      status: "scheduled_on_youtube",
-      videoId: job.youtubeResult.videoId,
-      publishAt: job.youtubeResult.publishAt,
-      mediaDeleted: true,
-    } satisfies CompleteYouTubeResponse);
+  if (["scheduled", "scheduled_on_youtube"].includes(job.status) && job.youtubeResult) {
+    return json(completionResponse(job));
+  }
+  if (job.youtubeVideoId && job.youtubeVideoId !== body.videoId) {
+    return json({ error: "This job is already associated with a different YouTube video." } satisfies ApiError, 409);
   }
 
-  const thumbnail = await env.UPLOADS.get(job.assets.thumbnail.key);
-  if (!thumbnail || thumbnail.size !== job.assets.thumbnail.size) {
-    return json({ error: "The temporary thumbnail is missing or changed." } satisfies ApiError, 409);
+  const processing: StoredJob = {
+    ...job,
+    schemaVersion: 3,
+    status: "processing",
+    youtubeVideoId: body.videoId,
+    updatedAt: new Date().toISOString(),
+    lastError: undefined,
+  };
+  await putJobWithRetry(env, processing);
+  await recordAppEvent(env, {
+    level: "info",
+    category: "youtube",
+    platform: "youtube",
+    jobId,
+    message: `YouTube received video ${body.videoId}; verifying its native schedule.`,
+  });
+
+  let accessToken: string;
+  let accepted;
+  try {
+    accessToken = await getYouTubeAccessToken(env);
+    accepted = await verifyYouTubeSchedule(body.videoId, processing, accessToken);
+  } catch (error) {
+    const message = errorMessage(error);
+    const failed: StoredJob = {
+      ...processing,
+      status: "failed",
+      updatedAt: new Date().toISOString(),
+      lastError: message,
+    };
+    await putJobWithRetry(env, failed);
+    await recordAppEvent(env, {
+      level: "error",
+      category: "youtube",
+      platform: "youtube",
+      jobId,
+      message,
+    });
+    return json({ error: `${message} Temporary source media was preserved.` } satisfies ApiError, 502);
   }
 
-  const accessToken = await getYouTubeAccessToken(env);
-  await setYouTubeThumbnail(body.videoId, thumbnail, job.assets.thumbnail.contentType, accessToken);
-  const accepted = await verifyYouTubeSchedule(body.videoId, job, accessToken);
+  const warnings = [...accepted.warnings];
+  let thumbnailApplied = false;
+  try {
+    const thumbnail = await env.UPLOADS.get(processing.assets.thumbnail.key);
+    if (!thumbnail || thumbnail.size !== processing.assets.thumbnail.size) {
+      throw new Error("The temporary thumbnail was missing or changed.");
+    }
+    await setYouTubeThumbnail(
+      accepted.videoId,
+      thumbnail,
+      processing.assets.thumbnail.contentType,
+      accessToken,
+    );
+    thumbnailApplied = true;
+  } catch (error) {
+    warnings.push(`Custom thumbnail was not applied: ${errorMessage(error)}`);
+  }
 
-  await env.UPLOADS.delete([job.assets.video.key, job.assets.thumbnail.key]);
+  let mediaDeleted = false;
+  try {
+    await env.UPLOADS.delete([processing.assets.video.key, processing.assets.thumbnail.key]);
+    const [video, thumbnail] = await Promise.all([
+      env.UPLOADS.head(processing.assets.video.key),
+      env.UPLOADS.head(processing.assets.thumbnail.key),
+    ]);
+    mediaDeleted = !video && !thumbnail;
+    if (!mediaDeleted) warnings.push("YouTube accepted the schedule, but temporary R2 cleanup is incomplete.");
+  } catch (error) {
+    warnings.push(`YouTube accepted the schedule, but temporary R2 cleanup failed: ${errorMessage(error)}`);
+  }
+
   const acceptedAt = new Date().toISOString();
   const completed: StoredJob = {
-    ...job,
-    status: "scheduled_on_youtube",
+    ...processing,
+    status: "scheduled",
     updatedAt: acceptedAt,
+    lastError: undefined,
     youtubeResult: {
       videoId: accepted.videoId,
       acceptedAt,
       uploadStatus: accepted.uploadStatus,
       privacyStatus: "private",
       publishAt: accepted.publishAt,
-      thumbnailApplied: true,
+      thumbnailApplied,
+      mediaDeleted,
+      warnings,
     },
   };
-  await env.METADATA.put(jobKey(job.id), JSON.stringify(completed));
+  try {
+    await putJobWithRetry(env, completed);
+  } catch (error) {
+    warnings.push(`Schedule succeeded, but status persistence needs a retry: ${errorMessage(error)}`);
+  }
+  await recordAppEvent(env, {
+    level: warnings.length ? "warning" : "info",
+    category: "youtube",
+    platform: "youtube",
+    jobId,
+    message: warnings.length
+      ? `YouTube scheduled ${accepted.videoId} with ${warnings.length} warning(s).`
+      : `YouTube scheduled ${accepted.videoId}; temporary media deleted.`,
+  });
 
-  return json({
+  return json(completionResponse(completed));
+}
+
+function completionResponse(job: StoredJob): CompleteYouTubeResponse {
+  const result = job.youtubeResult;
+  if (!result) throw new Error("The scheduled job has no YouTube result.");
+  return {
     id: job.id,
-    status: "scheduled_on_youtube",
-    videoId: accepted.videoId,
-    publishAt: accepted.publishAt,
-    mediaDeleted: true,
-  } satisfies CompleteYouTubeResponse);
+    status: "scheduled",
+    videoId: result.videoId,
+    publishAt: result.publishAt,
+    mediaDeleted: result.mediaDeleted ?? job.status === "scheduled_on_youtube",
+    thumbnailApplied: result.thumbnailApplied,
+    warnings: result.warnings ?? [],
+  };
 }
 
 async function verifyAssets(input: DraftRequest, bucket: R2Bucket): Promise<string | null> {
@@ -277,6 +421,20 @@ async function verifyAssets(input: DraftRequest, bucket: R2Bucket): Promise<stri
   return null;
 }
 
+async function putJobWithRetry(env: Env, job: StoredJob): Promise<void> {
+  let lastError: unknown;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      await env.METADATA.put(jobKey(job.id), JSON.stringify(job));
+      return;
+    } catch (error) {
+      lastError = error;
+      if (attempt < 2) await wait(1100);
+    }
+  }
+  throw lastError;
+}
+
 async function readJson(request: Request): Promise<unknown> {
   const contentType = request.headers.get("content-type") ?? "";
   if (!contentType.toLowerCase().includes("application/json")) return null;
@@ -289,6 +447,14 @@ async function readJson(request: Request): Promise<unknown> {
 
 function jobKey(jobId: string): string {
   return `job:${jobId}`;
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : "Unexpected server error.";
+}
+
+function wait(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
 function json(body: unknown, status = 200): Response {

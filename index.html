@@ -17,10 +17,16 @@
           <span class="brand-mark" aria-hidden="true">S</span>
           <span>Social Uploader</span>
         </a>
-        <span class="milestone-pill">YouTube - M2</span>
+        <div class="header-actions">
+          <nav class="view-nav" aria-label="Dashboard sections">
+            <button class="view-nav-button is-active" type="button" data-view-target="uploader-view">Uploader</button>
+            <button class="view-nav-button" type="button" data-view-target="status-view">System status</button>
+          </nav>
+          <span class="milestone-pill">YouTube - M2</span>
+        </div>
       </header>
 
-      <main>
+      <main id="uploader-view" data-view>
         <section class="hero" aria-labelledby="page-title">
           <p class="eyebrow">Upload once. Schedule natively.</p>
           <h1 id="page-title">Schedule your next Short.</h1>
@@ -210,11 +216,21 @@
 
             <section class="panel submit-panel">
               <div id="upload-status" class="upload-status" aria-live="polite" hidden>
+                <div class="status-heading">
+                  <span id="status-state" class="state-badge state-uploading">Uploading</span>
+                  <button id="cancel-upload" class="text-button cancel-button" type="button">Cancel</button>
+                </div>
                 <div class="status-copy">
                   <span id="status-label">Preparing upload...</span>
                   <strong id="status-percent">0%</strong>
                 </div>
                 <div class="progress-track" aria-hidden="true"><span id="progress-bar"></span></div>
+                <div id="upload-result" class="upload-result" hidden>
+                  <span>YouTube video <strong id="result-video-id"></strong></span>
+                  <span>Scheduled <strong id="result-scheduled-at"></strong></span>
+                  <span id="result-cleanup"></span>
+                  <span id="result-warnings" class="result-warnings" hidden></span>
+                </div>
               </div>
 
               <button id="save-button" class="primary-button" type="submit">
@@ -225,6 +241,72 @@
             </section>
           </aside>
         </form>
+      </main>
+
+      <main id="status-view" class="status-view" data-view hidden>
+        <section class="status-hero">
+          <div>
+            <p class="eyebrow">Existing infrastructure only</p>
+            <h1>System status</h1>
+            <p>Live temporary storage, connection state, upload jobs, and the latest app events.</p>
+          </div>
+          <div class="status-refresh-wrap">
+            <button id="status-refresh" class="connect-button" type="button">Refresh</button>
+            <small id="status-generated-at">Not loaded yet</small>
+          </div>
+        </section>
+
+        <section class="status-card-grid" aria-label="System overview">
+          <article class="panel status-card storage-card">
+            <p class="step-label">Temporary R2</p>
+            <div class="metric-row"><strong id="storage-used">—</strong><span id="storage-percent">—</span></div>
+            <div class="capacity-track" aria-hidden="true"><span id="storage-bar"></span></div>
+            <dl class="metric-details">
+              <div><dt>Objects</dt><dd id="storage-count">—</dd></div>
+              <div><dt>Oldest</dt><dd id="storage-oldest">—</dd></div>
+            </dl>
+            <p class="card-note">8 GB hard application cap. Seven-day lifecycle cleanup remains the fallback.</p>
+          </article>
+
+          <article class="panel status-card">
+            <p class="step-label">Connections</p>
+            <div class="connection-status-list">
+              <div><span class="platform-icon youtube">YT</span><strong>YouTube</strong><span id="status-youtube" class="connection-pill">—</span></div>
+              <div><span class="platform-icon instagram">IG</span><strong>Instagram</strong><span id="status-instagram" class="connection-pill">—</span></div>
+              <div><span class="platform-icon tiktok">TT</span><strong>TikTok</strong><span id="status-tiktok" class="connection-pill">—</span></div>
+            </div>
+          </article>
+
+          <article class="panel status-card local-worker-card">
+            <p class="step-label">Mini-PC worker</p>
+            <strong>Not configured</strong>
+            <p>Status and local disk usage will appear here when the local worker is built in a later milestone.</p>
+          </article>
+        </section>
+
+        <section class="panel status-section">
+          <div class="section-heading compact">
+            <div><p class="step-label">Recent activity</p><h2>Upload jobs</h2></div>
+            <p class="section-hint">Latest 50 metadata records</p>
+          </div>
+          <div class="table-scroll">
+            <table class="jobs-table">
+              <thead><tr><th>Platform</th><th>Status</th><th>File size</th><th>Created</th><th>Scheduled</th><th>Temp media</th></tr></thead>
+              <tbody id="jobs-table-body"><tr><td colspan="6" class="empty-cell">Load status to view jobs.</td></tr></tbody>
+            </table>
+          </div>
+        </section>
+
+        <div class="status-log-grid">
+          <section class="panel status-section">
+            <div class="section-heading compact"><div><p class="step-label">Attention</p><h2>Recent errors</h2></div></div>
+            <ol id="errors-list" class="event-list"><li class="empty-event">No errors loaded.</li></ol>
+          </section>
+          <section class="panel status-section">
+            <div class="section-heading compact"><div><p class="step-label">Last 50</p><h2>App events</h2></div></div>
+            <ol id="events-list" class="event-list"><li class="empty-event">No events loaded.</li></ol>
+          </section>
+        </div>
       </main>
 
       <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>

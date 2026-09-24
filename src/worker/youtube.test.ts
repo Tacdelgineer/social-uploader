@@ -29,7 +29,6 @@ describe("YouTube acceptance verification", () => {
             publishAt: "2026-10-01T19:30:00Z",
             selfDeclaredMadeForKids: false,
           },
-          processingDetails: { processingStatus: "processing" },
         },
         input,
         "video_123",
@@ -38,7 +37,26 @@ describe("YouTube acceptance verification", () => {
       videoId: "video_123",
       uploadStatus: "uploaded",
       publishAt: "2026-10-01T19:30:00Z",
+      warnings: [],
     });
+  });
+
+  it("reports optional metadata differences as warnings after schedule acceptance", () => {
+    expect(
+      assertScheduledVideoAccepted(
+        {
+          id: "video_123",
+          snippet: { title: "Changed by YouTube", description: input.description },
+          status: {
+            uploadStatus: "processed",
+            privacyStatus: "private",
+            publishAt: input.scheduledAt ?? undefined,
+          },
+        },
+        input,
+        "video_123",
+      ).warnings,
+    ).toHaveLength(2);
   });
 
   it("refuses a rejected upload or changed schedule", () => {

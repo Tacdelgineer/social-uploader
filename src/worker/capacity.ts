@@ -27,6 +27,18 @@ interface BucketSnapshot {
   sizesByKey: Map<string, number>;
 }
 
+export interface TemporaryStorageMetrics {
+  usedBytes: number;
+  capBytes: number;
+  usedPercent: number;
+  temporaryObjectCount: number;
+  oldestTemporaryObject: {
+    key: string;
+    size: number;
+    uploadedAt: string;
+  } | null;
+}
+
 export interface CapacityReservation {
   limitBytes: number;
   committedBytes: number;
@@ -46,6 +58,37 @@ export class DuplicateJobError extends Error {
     super("An upload reservation already exists for this draft.");
     this.name = "DuplicateJobError";
   }
+}
+
+export async function getTemporaryStorageMetrics(
+  bucket: R2Bucket,
+): Promise<TemporaryStorageMetrics> {
+  let cursor: string | undefined;
+  let usedBytes = 0;
+  let temporaryObjectCount = 0;
+  let oldestTemporaryObject: TemporaryStorageMetrics["oldestTemporaryObject"] = null;
+
+  do {
+    const page = await bucket.list({ cursor, limit: 1000 });
+    for (const object of page.objects) {
+      usedBytes += object.size;
+      if (object.key.startsWith("_system/")) continue;
+      temporaryObjectCount += 1;
+      const uploadedAt = object.uploaded.toISOString();
+      if (!oldestTemporaryObject || uploadedAt < oldestTemporaryObject.uploadedAt) {
+        oldestTemporaryObject = { key: object.key, size: object.size, uploadedAt };
+      }
+    }
+    cursor = page.truncated ? page.cursor : undefined;
+  } while (cursor);
+
+  return {
+    usedBytes,
+    capBytes: R2_STORAGE_CAP_BYTES,
+    usedPercent: Math.min(100, (usedBytes / R2_STORAGE_CAP_BYTES) * 100),
+    temporaryObjectCount,
+    oldestTemporaryObject,
+  };
 }
 
 export async function reserveUploadCapacity(

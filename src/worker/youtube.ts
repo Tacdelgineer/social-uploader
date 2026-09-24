@@ -14,10 +14,6 @@ interface YouTubeVideo {
     publishAt?: string;
     selfDeclaredMadeForKids?: boolean;
   };
-  processingDetails?: {
-    processingStatus?: string;
-    processingFailureReason?: string;
-  };
 }
 
 interface VideoListResponse {
@@ -29,6 +25,7 @@ export interface AcceptedYouTubeVideo {
   videoId: string;
   uploadStatus: string;
   publishAt: string;
+  warnings: string[];
 }
 
 export async function startYouTubeUpload(
@@ -90,14 +87,26 @@ export async function verifyYouTubeSchedule(
   accessToken: string,
 ): Promise<AcceptedYouTubeVideo> {
   const url = new URL("https://www.googleapis.com/youtube/v3/videos");
-  url.searchParams.set("part", "snippet,status,processingDetails");
+  url.searchParams.set("part", "snippet,status");
   url.searchParams.set("id", videoId);
-  const response = await fetch(url, { headers: { authorization: `Bearer ${accessToken}` } });
-  if (!response.ok) throw new Error(await googleError(response, "Could not verify the YouTube upload."));
-  const payload = (await response.json()) as VideoListResponse;
-  const video = payload.items?.[0];
-  if (!video) throw new Error("YouTube did not return the uploaded video for verification.");
-  return assertScheduledVideoAccepted(video, input, videoId);
+  let lastError: Error | null = null;
+
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    if (attempt > 0) await wait(attempt * 400);
+    try {
+      const response = await fetch(url, { headers: { authorization: `Bearer ${accessToken}` } });
+      if (!response.ok) {
+        throw new Error(await googleError(response, "Could not verify the YouTube upload."));
+      }
+      const payload = (await response.json()) as VideoListResponse;
+      const video = payload.items?.[0];
+      if (!video) throw new Error("YouTube has not returned the uploaded video yet.");
+      return assertScheduledVideoAccepted(video, input, videoId);
+    } catch (error) {
+      lastError = error instanceof Error ? error : new Error("Could not verify the YouTube upload.");
+    }
+  }
+  throw lastError ?? new Error("Could not verify the YouTube upload.");
 }
 
 export function assertScheduledVideoAccepted(
@@ -105,31 +114,28 @@ export function assertScheduledVideoAccepted(
   input: DraftRequest,
   expectedVideoId: string,
 ): AcceptedYouTubeVideo {
+  if (video.id !== expectedVideoId) throw new Error("YouTube returned a different video ID.");
   const uploadStatus = video.status?.uploadStatus ?? "unknown";
   if (!["uploaded", "processed"].includes(uploadStatus)) {
     const reason = video.status?.failureReason ?? video.status?.rejectionReason ?? uploadStatus;
     throw new Error(`YouTube did not accept the upload: ${reason}.`);
   }
-  if (video.processingDetails?.processingStatus === "failed") {
-    throw new Error(
-      `YouTube processing failed: ${video.processingDetails.processingFailureReason ?? "unknown reason"}.`,
-    );
-  }
-  if (video.id !== expectedVideoId) throw new Error("YouTube returned a different video ID.");
-  if (video.snippet?.title !== input.title.trim() || video.snippet.description !== input.description) {
-    throw new Error("YouTube did not retain the requested title and description.");
-  }
   if (video.status?.privacyStatus !== "private") {
     throw new Error("YouTube did not keep the video private until its scheduled publish time.");
-  }
-  if (video.status.selfDeclaredMadeForKids !== input.youtube.madeForKids) {
-    throw new Error("YouTube did not retain the made-for-kids setting.");
   }
   const publishAt = video.status.publishAt;
   if (!publishAt || !sameSecond(publishAt, input.scheduledAt)) {
     throw new Error("YouTube did not retain the requested scheduled publish time.");
   }
-  return { videoId: expectedVideoId, uploadStatus, publishAt };
+
+  const warnings: string[] = [];
+  if (video.snippet?.title !== input.title.trim() || video.snippet.description !== input.description) {
+    warnings.push("YouTube accepted the schedule, but the returned title or description differed.");
+  }
+  if (video.status.selfDeclaredMadeForKids !== input.youtube.madeForKids) {
+    warnings.push("YouTube accepted the schedule, but did not echo the made-for-kids setting.");
+  }
+  return { videoId: expectedVideoId, uploadStatus, publishAt, warnings };
 }
 
 async function googleError(response: Response, fallback: string): Promise<string> {
@@ -144,4 +150,8 @@ async function googleError(response: Response, fallback: string): Promise<string
 function sameSecond(left: string, right: string | null): boolean {
   if (!right) return false;
   return Math.abs(new Date(left).getTime() - new Date(right).getTime()) < 1000;
+}
+
+function wait(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }

@@ -8,6 +8,14 @@ export const YOUTUBE_THUMBNAIL_CONTENT_TYPES = ["image/jpeg", "image/png"] as co
 
 export type AssetKind = "video" | "thumbnail";
 export type Platform = "youtube" | "instagram" | "tiktok";
+export type JobStatus =
+  | "uploading"
+  | "processing"
+  | "scheduled"
+  | "failed"
+  | "cancelled"
+  | "uploading_to_youtube"
+  | "scheduled_on_youtube";
 
 export interface UploadFileRequest {
   kind: AssetKind;
@@ -63,23 +71,27 @@ export interface DraftRequest {
 }
 
 export interface StoredJob extends DraftRequest {
-  schemaVersion: 2;
-  status: "uploading_to_youtube" | "scheduled_on_youtube";
+  schemaVersion: 2 | 3;
+  status: JobStatus;
   createdAt: string;
   updatedAt: string;
+  lastError?: string;
+  youtubeVideoId?: string;
   youtubeResult?: {
     videoId: string;
     acceptedAt: string;
     uploadStatus: string;
     privacyStatus: "private";
     publishAt: string;
-    thumbnailApplied: true;
+    thumbnailApplied: boolean;
+    mediaDeleted?: boolean;
+    warnings?: string[];
   };
 }
 
 export interface CreateJobResponse {
   id: string;
-  status: "uploading_to_youtube";
+  status: "uploading";
   youtube: {
     uploadUrl: string;
     accessToken: string;
@@ -92,10 +104,61 @@ export interface CompleteYouTubeRequest {
 
 export interface CompleteYouTubeResponse {
   id: string;
-  status: "scheduled_on_youtube";
+  status: "scheduled";
   videoId: string;
   publishAt: string;
-  mediaDeleted: true;
+  mediaDeleted: boolean;
+  thumbnailApplied: boolean;
+  warnings: string[];
+}
+
+export interface JobStateUpdateRequest {
+  status: "failed" | "cancelled";
+  error?: string;
+}
+
+export interface AppEvent {
+  id: string;
+  timestamp: string;
+  level: "info" | "warning" | "error";
+  category: "upload" | "youtube" | "storage" | "oauth" | "system";
+  message: string;
+  platform?: Platform;
+  jobId?: string;
+}
+
+export interface SystemJobSummary {
+  id: string;
+  platform: Platform;
+  status: "uploading" | "processing" | "scheduled" | "failed" | "cancelled";
+  fileSizeBytes: number;
+  createdAt: string;
+  scheduledAt: string | null;
+  temporaryMediaDeleted: boolean;
+  videoId?: string;
+  lastError?: string;
+}
+
+export interface SystemStatusResponse {
+  generatedAt: string;
+  storage: {
+    usedBytes: number;
+    capBytes: number;
+    usedPercent: number;
+    temporaryObjectCount: number;
+    oldestTemporaryObject: {
+      key: string;
+      size: number;
+      uploadedAt: string;
+    } | null;
+  };
+  connections: Record<Platform, boolean>;
+  jobs: SystemJobSummary[];
+  recentErrors: AppEvent[];
+  events: AppEvent[];
+  localWorker: {
+    configured: false;
+  };
 }
 
 export interface YouTubeConnectionStatus {

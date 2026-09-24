@@ -10,8 +10,12 @@ import {
   type DraftRequest,
   type PresignRequest,
   type PresignResponse,
+  type StoredJob,
+  type SystemStatusResponse,
   type YouTubeConnectionStatus,
 } from "../shared/contracts";
+
+type UploadState = "uploading" | "processing" | "scheduled" | "failed" | "cancelled";
 
 const form = requiredElement<HTMLFormElement>("draft-form");
 const videoInput = requiredElement<HTMLInputElement>("video-input");
@@ -22,10 +26,13 @@ const titleInput = requiredElement<HTMLInputElement>("title");
 const descriptionInput = requiredElement<HTMLTextAreaElement>("description");
 const scheduledAtInput = requiredElement<HTMLInputElement>("scheduled-at");
 const saveButton = requiredElement<HTMLButtonElement>("save-button");
+const cancelButton = requiredElement<HTMLButtonElement>("cancel-upload");
 const uploadStatus = requiredElement<HTMLElement>("upload-status");
+const statusState = requiredElement<HTMLElement>("status-state");
 const statusLabel = requiredElement<HTMLElement>("status-label");
 const statusPercent = requiredElement<HTMLElement>("status-percent");
 const progressBar = requiredElement<HTMLElement>("progress-bar");
+const uploadResult = requiredElement<HTMLElement>("upload-result");
 const toast = requiredElement<HTMLElement>("toast");
 const youtubeConnect = requiredElement<HTMLButtonElement>("youtube-connect");
 const youtubeDisconnect = requiredElement<HTMLButtonElement>("youtube-disconnect");
@@ -36,9 +43,14 @@ let thumbnailFile: File | null = null;
 let thumbnailObjectUrl: string | null = null;
 let youtubeConnected = false;
 let toastTimer: number | undefined;
+let currentPercent = 0;
+let activeJobId: string | null = null;
+let cancelRequested = false;
+const activeXhrs = new Set<XMLHttpRequest>();
 
 setupDropzone(videoDropzone, videoInput, setVideo);
 setupDropzone(thumbnailDropzone, thumbnailInput, setThumbnail);
+setupViewNavigation();
 setScheduleMinimum();
 void refreshYouTubeStatus();
 showOAuthResult();
@@ -78,19 +90,35 @@ document.querySelectorAll<HTMLInputElement>(".toggle-wrap input").forEach((toggl
   toggle.addEventListener("click", (event) => event.stopPropagation());
 });
 
+cancelButton.addEventListener("click", () => {
+  cancelRequested = true;
+  for (const xhr of activeXhrs) xhr.abort();
+  setProgress("cancelled", "Upload cancelled", currentPercent);
+  if (activeJobId) void reportJobState(activeJobId, "cancelled", "Upload cancelled by user.");
+});
+
+requiredElement<HTMLButtonElement>("status-refresh").addEventListener("click", () => {
+  void refreshSystemStatus();
+});
+
 form.addEventListener("submit", async (event) => {
   event.preventDefault();
   if (!validateForm()) return;
 
   setBusy(true);
+  cancelRequested = false;
+  activeJobId = null;
+  currentPercent = 0;
+  uploadResult.hidden = true;
   const jobId = crypto.randomUUID();
 
   try {
-    setProgress("Reserving capped temporary storage...", 3);
+    setProgress("uploading", "Reserving capped temporary storage...", 3);
     const reservation = await requestPresign(jobId, videoFile!, thumbnailFile!);
+    throwIfCancelled();
     const { video: videoUpload, thumbnail: thumbnailUpload } = reservation.uploads;
 
-    setProgress("Staging files directly in R2...", 6);
+    setProgress("uploading", "Staging files directly in R2...", 6);
     const progress = { video: 0, thumbnail: 0 };
     await Promise.all([
       uploadDirectToR2(videoUpload.uploadUrl, videoFile!, (value) => {
@@ -102,37 +130,73 @@ form.addEventListener("submit", async (event) => {
         setR2Progress(progress);
       }),
     ]);
+    throwIfCancelled();
 
-    setProgress("Creating YouTube schedule...", 48);
+    setProgress("uploading", "Creating YouTube upload session...", 48);
     const job = buildJob(jobId, videoUpload.objectKey, thumbnailUpload.objectKey);
     const created = await apiRequest<CreateJobResponse>("/api/jobs", {
       method: "POST",
       body: JSON.stringify(job),
     });
+    activeJobId = created.id;
+    throwIfCancelled();
 
-    setProgress("Uploading video directly to YouTube...", 52);
+    setProgress("uploading", "Uploading video directly to YouTube...", 52);
     const videoId = await uploadDirectToYouTube(
       created.youtube.uploadUrl,
       created.youtube.accessToken,
       videoFile!,
-      (value) => setProgress("Uploading video directly to YouTube...", 52 + Math.round(value * 39)),
+      (value) => setProgress("uploading", "Uploading video directly to YouTube...", 52 + Math.round(value * 39)),
     );
+    throwIfCancelled();
 
-    setProgress("Applying thumbnail and verifying schedule...", 94);
+    setProgress("processing", "YouTube received the video; verifying its schedule...", 94);
     const completed = await apiRequest<CompleteYouTubeResponse>(
       `/api/jobs/${encodeURIComponent(jobId)}/youtube/complete`,
       { method: "POST", body: JSON.stringify({ videoId }) },
     );
-    setProgress("Scheduled and temporary media deleted", 100);
-    showToast(`YouTube accepted video ${completed.videoId}; temporary R2 files were deleted.`);
-    resetForm();
+    showScheduledResult(completed);
   } catch (error) {
-    showToast(`${errorMessage(error)} Temporary files remain protected by 7-day cleanup.`, true);
-    setProgress("Upload stopped", 0);
+    const recovered = activeJobId ? await recoverScheduledJob(activeJobId) : null;
+    if (recovered) {
+      showScheduledResult(recovered);
+    } else {
+      const message = errorMessage(error);
+      const finalState: UploadState = cancelRequested ? "cancelled" : "failed";
+      setProgress(
+        finalState,
+        finalState === "cancelled" ? "Upload cancelled" : "Upload failed",
+        currentPercent,
+      );
+      if (activeJobId) await reportJobState(activeJobId, finalState, message);
+      showToast(
+        finalState === "cancelled"
+          ? "Upload cancelled. Temporary files remain covered by the 7-day cleanup fallback."
+          : `${message} Temporary files remain protected by 7-day cleanup.`,
+        finalState === "failed",
+      );
+    }
   } finally {
     setBusy(false);
+    activeJobId = null;
+    activeXhrs.clear();
   }
 });
+
+function setupViewNavigation(): void {
+  document.querySelectorAll<HTMLButtonElement>("[data-view-target]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const target = button.dataset.viewTarget;
+      document.querySelectorAll<HTMLElement>("[data-view]").forEach((view) => {
+        view.hidden = view.id !== target;
+      });
+      document.querySelectorAll<HTMLButtonElement>("[data-view-target]").forEach((item) => {
+        item.classList.toggle("is-active", item === button);
+      });
+      if (target === "status-view") void refreshSystemStatus();
+    });
+  });
+}
 
 function setupDropzone(
   dropzone: HTMLElement,
@@ -251,11 +315,7 @@ function buildJob(jobId: string, videoKey: string, thumbnailKey: string): DraftR
   };
 }
 
-async function requestPresign(
-  jobId: string,
-  video: File,
-  thumbnail: File,
-): Promise<PresignResponse> {
+async function requestPresign(jobId: string, video: File, thumbnail: File): Promise<PresignResponse> {
   const payload: PresignRequest = {
     jobId,
     files: [
@@ -270,55 +330,76 @@ async function requestPresign(
 }
 
 function uploadDirectToR2(url: string, file: File, onProgress: (value: number) => void): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const xhr = new XMLHttpRequest();
-    xhr.open("PUT", url);
-    xhr.setRequestHeader("Content-Type", file.type);
-    xhr.upload.addEventListener("progress", (event) => {
-      if (event.lengthComputable) onProgress(event.loaded / event.total);
-    });
-    xhr.addEventListener("load", () => {
-      if (xhr.status >= 200 && xhr.status < 300) resolve();
-      else reject(new Error(`R2 rejected ${file.name} (HTTP ${xhr.status}).`));
-    });
-    xhr.addEventListener("error", () => reject(new Error(`Could not upload ${file.name} to R2.`)));
-    xhr.addEventListener("abort", () => reject(new Error(`Upload cancelled for ${file.name}.`)));
-    xhr.send(file);
+  return uploadWithXhr(url, file, { "Content-Type": file.type }, onProgress, (xhr) => {
+    if (xhr.status < 200 || xhr.status >= 300) {
+      throw new Error(`R2 rejected ${file.name} (HTTP ${xhr.status}).`);
+    }
   });
 }
 
-function uploadDirectToYouTube(
+async function uploadDirectToYouTube(
   url: string,
   accessToken: string,
   file: File,
   onProgress: (value: number) => void,
 ): Promise<string> {
+  let videoId = "";
+  await uploadWithXhr(
+    url,
+    file,
+    { Authorization: `Bearer ${accessToken}`, "Content-Type": file.type },
+    onProgress,
+    (xhr) => {
+      const payload = parseJson(xhr.responseText) as { id?: string; error?: { message?: string } } | null;
+      if (xhr.status < 200 || xhr.status >= 300 || !payload?.id) {
+        throw new Error(payload?.error?.message ?? `YouTube upload failed (HTTP ${xhr.status}).`);
+      }
+      videoId = payload.id;
+    },
+  );
+  return videoId;
+}
+
+function uploadWithXhr(
+  url: string,
+  file: File,
+  headers: Record<string, string>,
+  onProgress: (value: number) => void,
+  validate: (xhr: XMLHttpRequest) => void,
+): Promise<void> {
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
+    activeXhrs.add(xhr);
     xhr.open("PUT", url);
-    xhr.setRequestHeader("Authorization", `Bearer ${accessToken}`);
-    xhr.setRequestHeader("Content-Type", file.type);
+    for (const [name, value] of Object.entries(headers)) xhr.setRequestHeader(name, value);
     xhr.upload.addEventListener("progress", (event) => {
       if (event.lengthComputable) onProgress(event.loaded / event.total);
     });
     xhr.addEventListener("load", () => {
-      const payload = parseJson(xhr.responseText) as
-        | { id?: string; error?: { message?: string } }
-        | null;
-      if (xhr.status >= 200 && xhr.status < 300 && payload?.id) resolve(payload.id);
-      else reject(new Error(payload?.error?.message ?? `YouTube upload failed (HTTP ${xhr.status}).`));
+      activeXhrs.delete(xhr);
+      try {
+        validate(xhr);
+        resolve();
+      } catch (error) {
+        reject(error);
+      }
     });
-    xhr.addEventListener("error", () => reject(new Error("The direct YouTube upload was interrupted.")));
-    xhr.addEventListener("abort", () => reject(new Error("The direct YouTube upload was cancelled.")));
+    xhr.addEventListener("error", () => {
+      activeXhrs.delete(xhr);
+      reject(new Error(`The upload of ${file.name} was interrupted.`));
+    });
+    xhr.addEventListener("abort", () => {
+      activeXhrs.delete(xhr);
+      reject(new Error(`Upload cancelled for ${file.name}.`));
+    });
     xhr.send(file);
   });
 }
 
-async function apiRequest<T>(path: string, init: RequestInit): Promise<T> {
-  const response = await fetch(path, {
-    ...init,
-    headers: { "content-type": "application/json", ...init.headers },
-  });
+async function apiRequest<T>(path: string, init: RequestInit = {}): Promise<T> {
+  const headers = new Headers(init.headers);
+  if (init.body) headers.set("content-type", "application/json");
+  const response = await fetch(path, { ...init, headers });
   const payload = (await response.json().catch(() => null)) as T | ApiError | null;
   if (!response.ok) {
     const message =
@@ -330,9 +411,73 @@ async function apiRequest<T>(path: string, init: RequestInit): Promise<T> {
   return payload as T;
 }
 
+async function recoverScheduledJob(jobId: string): Promise<CompleteYouTubeResponse | null> {
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    if (attempt > 0) await delay(700);
+    try {
+      const job = await apiRequest<StoredJob>(`/api/jobs/${encodeURIComponent(jobId)}`);
+      if ((job.status === "scheduled" || job.status === "scheduled_on_youtube") && job.youtubeResult) {
+        return {
+          id: job.id,
+          status: "scheduled",
+          videoId: job.youtubeResult.videoId,
+          publishAt: job.youtubeResult.publishAt,
+          mediaDeleted: job.youtubeResult.mediaDeleted ?? job.status === "scheduled_on_youtube",
+          thumbnailApplied: job.youtubeResult.thumbnailApplied,
+          warnings: job.youtubeResult.warnings ?? [],
+        };
+      }
+      if (job.status === "failed" || job.status === "cancelled") return null;
+    } catch {
+      // A lost completion response may briefly race KV visibility; retry a few times.
+    }
+  }
+  return null;
+}
+
+async function reportJobState(
+  jobId: string,
+  status: "failed" | "cancelled",
+  error: string,
+): Promise<void> {
+  try {
+    await apiRequest(`/api/jobs/${encodeURIComponent(jobId)}`, {
+      method: "POST",
+      body: JSON.stringify({ status, error }),
+    });
+  } catch {
+    // The visible state is still useful; backend logging is best effort after a client failure.
+  }
+}
+
+function showScheduledResult(completed: CompleteYouTubeResponse): void {
+  setProgress(
+    "scheduled",
+    completed.mediaDeleted
+      ? "Scheduled successfully; temporary media deleted"
+      : "Scheduled successfully; R2 cleanup needs attention",
+    100,
+  );
+  requiredElement<HTMLElement>("result-video-id").textContent = completed.videoId;
+  requiredElement<HTMLElement>("result-scheduled-at").textContent = formatDate(completed.publishAt);
+  requiredElement<HTMLElement>("result-cleanup").textContent = completed.mediaDeleted
+    ? "Temporary video and thumbnail deleted"
+    : "Temporary media retained; 7-day cleanup fallback remains active";
+  const warningElement = requiredElement<HTMLElement>("result-warnings");
+  warningElement.textContent = completed.warnings.join(" ");
+  warningElement.hidden = completed.warnings.length === 0;
+  uploadResult.hidden = false;
+  showToast(
+    completed.warnings.length
+      ? `YouTube scheduled ${completed.videoId} with ${completed.warnings.length} warning(s).`
+      : `YouTube scheduled ${completed.videoId} for ${formatDate(completed.publishAt)}.`,
+  );
+  resetForm();
+}
+
 async function refreshYouTubeStatus(): Promise<void> {
   try {
-    const status = await apiRequest<YouTubeConnectionStatus>("/api/oauth/youtube/status", { method: "GET" });
+    const status = await apiRequest<YouTubeConnectionStatus>("/api/oauth/youtube/status");
     setYouTubeConnection(status.connected);
   } catch {
     setYouTubeConnection(false);
@@ -346,6 +491,123 @@ function setYouTubeConnection(connected: boolean): void {
   youtubeConnectionLabel.classList.toggle("is-connected", connected);
   youtubeConnect.textContent = connected ? "Reconnect YouTube" : "Connect YouTube";
   youtubeDisconnect.hidden = !connected;
+}
+
+async function refreshSystemStatus(): Promise<void> {
+  const refresh = requiredElement<HTMLButtonElement>("status-refresh");
+  refresh.disabled = true;
+  refresh.textContent = "Refreshing...";
+  try {
+    const status = await apiRequest<SystemStatusResponse>("/api/system/status");
+    renderSystemStatus(status);
+  } catch (error) {
+    showToast(errorMessage(error), true);
+  } finally {
+    refresh.disabled = false;
+    refresh.textContent = "Refresh";
+  }
+}
+
+function renderSystemStatus(status: SystemStatusResponse): void {
+  requiredElement<HTMLElement>("status-generated-at").textContent = `Updated ${formatDate(status.generatedAt)}`;
+  requiredElement<HTMLElement>("storage-used").textContent = `${formatBytes(status.storage.usedBytes)} / 8 GB`;
+  requiredElement<HTMLElement>("storage-percent").textContent = `${status.storage.usedPercent.toFixed(2)}%`;
+  requiredElement<HTMLElement>("storage-bar").style.width = `${status.storage.usedPercent}%`;
+  requiredElement<HTMLElement>("storage-count").textContent = String(status.storage.temporaryObjectCount);
+  requiredElement<HTMLElement>("storage-oldest").textContent = status.storage.oldestTemporaryObject
+    ? `${formatDate(status.storage.oldestTemporaryObject.uploadedAt)} (${formatBytes(status.storage.oldestTemporaryObject.size)})`
+    : "None";
+
+  renderConnection("status-youtube", status.connections.youtube);
+  renderConnection("status-instagram", status.connections.instagram);
+  renderConnection("status-tiktok", status.connections.tiktok);
+  renderJobs(status);
+  renderEvents("errors-list", status.recentErrors, "No recent errors.");
+  renderEvents("events-list", status.events, "No app events yet.");
+}
+
+function renderConnection(id: string, connected: boolean): void {
+  const element = requiredElement<HTMLElement>(id);
+  element.textContent = connected ? "Connected" : "Not connected";
+  element.classList.toggle("is-connected", connected);
+}
+
+function renderJobs(status: SystemStatusResponse): void {
+  const body = requiredElement<HTMLTableSectionElement>("jobs-table-body");
+  body.replaceChildren();
+  if (status.jobs.length === 0) {
+    const row = document.createElement("tr");
+    const cell = document.createElement("td");
+    cell.colSpan = 6;
+    cell.className = "empty-cell";
+    cell.textContent = "No upload jobs yet.";
+    row.append(cell);
+    body.append(row);
+    return;
+  }
+  for (const job of status.jobs) {
+    const row = document.createElement("tr");
+    const platform = document.createElement("td");
+    platform.textContent = capitalize(job.platform);
+    const state = document.createElement("td");
+    const badge = document.createElement("span");
+    badge.className = `job-state state-${job.status}`;
+    badge.textContent = capitalize(job.status);
+    if (job.lastError) badge.title = job.lastError;
+    state.append(badge);
+    appendCells(
+      row,
+      platform,
+      state,
+      formatBytes(job.fileSizeBytes),
+      formatDate(job.createdAt),
+      job.scheduledAt ? formatDate(job.scheduledAt) : "—",
+      job.temporaryMediaDeleted ? "Deleted" : "Retained",
+    );
+    body.append(row);
+  }
+}
+
+function appendCells(row: HTMLTableRowElement, ...values: Array<string | HTMLTableCellElement>): void {
+  for (const value of values) {
+    if (value instanceof HTMLTableCellElement) row.append(value);
+    else {
+      const cell = document.createElement("td");
+      cell.textContent = value;
+      row.append(cell);
+    }
+  }
+}
+
+function renderEvents(
+  id: string,
+  events: SystemStatusResponse["events"],
+  emptyMessage: string,
+): void {
+  const list = requiredElement<HTMLOListElement>(id);
+  list.replaceChildren();
+  if (events.length === 0) {
+    const item = document.createElement("li");
+    item.className = "empty-event";
+    item.textContent = emptyMessage;
+    list.append(item);
+    return;
+  }
+  for (const event of events) {
+    const item = document.createElement("li");
+    item.className = `event-item event-${event.level}`;
+    const heading = document.createElement("div");
+    const category = document.createElement("strong");
+    category.textContent = event.platform ? capitalize(event.platform) : capitalize(event.category);
+    const time = document.createElement("time");
+    time.dateTime = event.timestamp;
+    time.textContent = formatDate(event.timestamp);
+    heading.append(category, time);
+    const message = document.createElement("p");
+    message.textContent = event.message;
+    item.append(heading, message);
+    list.append(item);
+  }
 }
 
 function showOAuthResult(): void {
@@ -366,20 +628,28 @@ function toAsset(key: string, file: File) {
 function setR2Progress(progress: { video: number; thumbnail: number }): void {
   const totalBytes = videoFile!.size + thumbnailFile!.size;
   const uploadedBytes = videoFile!.size * progress.video + thumbnailFile!.size * progress.thumbnail;
-  setProgress("Staging files directly in R2...", 6 + Math.round((uploadedBytes / totalBytes) * 40));
+  setProgress("uploading", "Staging files directly in R2...", 6 + Math.round((uploadedBytes / totalBytes) * 40));
 }
 
-function setProgress(label: string, percent: number): void {
+function setProgress(state: UploadState, label: string, percent: number): void {
+  currentPercent = Math.max(currentPercent, percent);
+  if (state === "failed" || state === "cancelled") currentPercent = percent;
   uploadStatus.hidden = false;
+  statusState.textContent = capitalize(state);
+  statusState.className = `state-badge state-${state}`;
   statusLabel.textContent = label;
-  statusPercent.textContent = `${percent}%`;
-  progressBar.style.width = `${percent}%`;
+  statusPercent.textContent = `${currentPercent}%`;
+  progressBar.style.width = `${currentPercent}%`;
+  uploadStatus.dataset.state = state;
+  cancelButton.hidden = !["uploading"].includes(state);
+  cancelButton.disabled = state !== "uploading";
 }
 
 function setBusy(isBusy: boolean): void {
   saveButton.disabled = isBusy;
   form.setAttribute("aria-busy", String(isBusy));
   saveButton.querySelector("span")!.textContent = isBusy ? "Working..." : "Upload & schedule";
+  if (!isBusy) cancelButton.hidden = true;
 }
 
 function resetForm(): void {
@@ -419,6 +689,10 @@ function showToast(message: string, isError = false): void {
   }, 7000);
 }
 
+function throwIfCancelled(): void {
+  if (cancelRequested) throw new Error("Upload cancelled by user.");
+}
+
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : "Something went wrong.";
 }
@@ -436,9 +710,23 @@ function updateCount(id: string, value: number): void {
 }
 
 function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
   if (bytes < 1024 * 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
   return `${(bytes / 1024 / 1024 / 1024).toFixed(2)} GB`;
+}
+
+function formatDate(value: string): string {
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? value : date.toLocaleString();
+}
+
+function capitalize(value: string): string {
+  return `${value.charAt(0).toUpperCase()}${value.slice(1)}`;
+}
+
+function delay(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => window.setTimeout(resolve, milliseconds));
 }
 
 function requiredElement<T extends HTMLElement>(id: string): T {
