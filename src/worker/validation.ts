@@ -1,4 +1,6 @@
 import {
+  INSTAGRAM_COVER_MAX_BYTES,
+  INSTAGRAM_VIDEO_MAX_BYTES,
   THUMBNAIL_CONTENT_TYPES,
   THUMBNAIL_MAX_BYTES,
   VIDEO_CONTENT_TYPES,
@@ -57,31 +59,84 @@ function validateUploadFile(value: unknown): UploadFileRequest | null {
 
 export function validateDraftRequest(value: unknown, now = new Date()): DraftRequest | null {
   if (!isRecord(value)) return null;
-  const { id, title, description, scheduledAt, timezone, platforms, youtube, assets } = value;
+  const {
+    id,
+    title,
+    description,
+    scheduledAt,
+    timezone,
+    videoDurationSeconds,
+    platforms,
+    youtube,
+    instagram,
+    tiktok,
+    assets,
+  } = value;
   if (typeof id !== "string" || !UUID_PATTERN.test(id)) return null;
   if (typeof title !== "string" || title.trim().length < 1 || title.length > 100) return null;
   if (typeof description !== "string" || description.length > 2200) return null;
+  if (typeof timezone !== "string" || !TIMEZONE_PATTERN.test(timezone)) return null;
   if (
-    typeof scheduledAt !== "string" ||
-    !isValidIsoDate(scheduledAt) ||
-    new Date(scheduledAt).getTime() <= now.getTime() + 60_000
+    typeof videoDurationSeconds !== "number" ||
+    !Number.isFinite(videoDurationSeconds) ||
+    videoDurationSeconds <= 0 ||
+    videoDurationSeconds > 10 * 60 * 60
   ) {
     return null;
   }
-  if (typeof timezone !== "string" || !TIMEZONE_PATTERN.test(timezone)) return null;
-  if (!isRecord(platforms) || !isYouTubeOnlyPlatformRecord(platforms)) return null;
+  if (!isRecord(platforms) || !isPlatformRecord(platforms)) return null;
+  if (platforms.youtube) {
+    if (
+      typeof scheduledAt !== "string" ||
+      !isValidIsoDate(scheduledAt) ||
+      new Date(scheduledAt).getTime() <= now.getTime() + 60_000
+    ) {
+      return null;
+    }
+  } else if (scheduledAt !== null) {
+    if (typeof scheduledAt !== "string" || !isValidIsoDate(scheduledAt)) return null;
+  }
   if (!isRecord(youtube) || youtube.visibility !== "public" || typeof youtube.madeForKids !== "boolean") {
+    return null;
+  }
+  if (!isRecord(instagram) || typeof instagram.shareToFeed !== "boolean") return null;
+  if (
+    !isRecord(tiktok) ||
+    tiktok.privacy !== "SELF_ONLY" ||
+    typeof tiktok.allowComments !== "boolean" ||
+    typeof tiktok.allowDuet !== "boolean" ||
+    typeof tiktok.allowStitch !== "boolean" ||
+    typeof tiktok.coverTimestampMs !== "number" ||
+    !Number.isSafeInteger(tiktok.coverTimestampMs) ||
+    tiktok.coverTimestampMs < 0 ||
+    tiktok.coverTimestampMs >= Math.ceil(videoDurationSeconds * 1000)
+  ) {
     return null;
   }
   if (!isRecord(assets) || !isAssetInput(assets.video, id, "video") || !isAssetInput(assets.thumbnail, id, "thumbnail")) {
     return null;
   }
-  if (
-    !isRecord(assets.thumbnail) ||
-    typeof assets.thumbnail.contentType !== "string" ||
-    !(YOUTUBE_THUMBNAIL_CONTENT_TYPES as readonly string[]).includes(assets.thumbnail.contentType)
-  ) {
-    return null;
+  if (!isRecord(assets.video) || !isRecord(assets.thumbnail)) return null;
+  if (platforms.youtube) {
+    if (
+      typeof assets.thumbnail.contentType !== "string" ||
+      !(YOUTUBE_THUMBNAIL_CONTENT_TYPES as readonly string[]).includes(assets.thumbnail.contentType)
+    ) {
+      return null;
+    }
+  }
+  if (platforms.instagram) {
+    if (
+      typeof assets.video.size !== "number" ||
+      typeof assets.thumbnail.size !== "number" ||
+      assets.video.size > INSTAGRAM_VIDEO_MAX_BYTES ||
+      assets.thumbnail.contentType !== "image/jpeg" ||
+      assets.thumbnail.size > INSTAGRAM_COVER_MAX_BYTES ||
+      videoDurationSeconds < 3 ||
+      videoDurationSeconds > 15 * 60
+    ) {
+      return null;
+    }
   }
 
   return value as unknown as DraftRequest;
@@ -92,8 +147,15 @@ function isValidIsoDate(value: string): boolean {
   return !Number.isNaN(parsed.getTime()) && parsed.toISOString() === value;
 }
 
-function isYouTubeOnlyPlatformRecord(value: Record<string, unknown>): boolean {
-  return value.youtube === true && value.instagram === false && value.tiktok === false;
+function isPlatformRecord(value: Record<string, unknown>): boolean {
+  if (
+    typeof value.youtube !== "boolean" ||
+    typeof value.instagram !== "boolean" ||
+    typeof value.tiktok !== "boolean"
+  ) {
+    return false;
+  }
+  return value.youtube || value.instagram || value.tiktok;
 }
 
 function isAssetInput(value: unknown, jobId: string, kind: AssetKind): boolean {

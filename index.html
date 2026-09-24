@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta
       name="description"
-      content="Upload one short-form video and schedule it natively on YouTube."
+      content="Upload one short-form video for YouTube Shorts, Instagram Reels, and TikTok."
     />
     <title>Social Uploader</title>
     <script type="module" src="/src/client/main.ts"></script>
@@ -22,17 +22,17 @@
             <button class="view-nav-button is-active" type="button" data-view-target="uploader-view">Uploader</button>
             <button class="view-nav-button" type="button" data-view-target="status-view">System status</button>
           </nav>
-          <span class="milestone-pill">YouTube - M2</span>
+          <span class="milestone-pill">Multi-platform - M3</span>
         </div>
       </header>
 
       <main id="uploader-view" data-view>
         <section class="hero" aria-labelledby="page-title">
-          <p class="eyebrow">Upload once. Schedule natively.</p>
-          <h1 id="page-title">Schedule your next Short.</h1>
+          <p class="eyebrow">One source. Three official APIs.</p>
+          <h1 id="page-title">Publish your next short video.</h1>
           <p class="hero-copy">
-            Stage the source files temporarily, send the video directly to YouTube, verify the
-            schedule, and remove the transfer copy.
+            Stage one transfer copy, send it to your selected platforms, verify provider custody,
+            and remove the temporary media as soon as every selected destination is done with it.
           </p>
         </section>
 
@@ -92,9 +92,9 @@
               <div class="section-heading">
                 <div>
                   <p class="step-label">02 - Details</p>
-                  <h2 id="details-heading">YouTube details</h2>
+                  <h2 id="details-heading">Post details</h2>
                 </div>
-                <p class="section-hint">Applied to the scheduled upload</p>
+                <p class="section-hint">Title plus shared caption</p>
               </div>
 
               <div class="field-stack">
@@ -112,7 +112,7 @@
                 </label>
 
                 <label class="field">
-                  <span>Description</span>
+                  <span>Caption / YouTube description</span>
                   <textarea
                     id="description"
                     name="description"
@@ -126,7 +126,7 @@
                 <label class="field schedule-field">
                   <span>Publish date and time</span>
                   <input id="scheduled-at" name="scheduledAt" type="datetime-local" required />
-                  <small id="timezone-label">Scheduled in your local time zone</small>
+                  <small id="timezone-label">Schedule applies to YouTube only</small>
                 </label>
               </div>
             </section>
@@ -176,39 +176,65 @@
                   </div>
                 </details>
 
-                <details class="platform-card is-placeholder">
+                <details class="platform-card">
                   <summary>
                     <span class="platform-identity">
                       <span class="platform-icon instagram" aria-hidden="true">IG</span>
-                      <span><strong>Instagram</strong><small>Placeholder only</small></span>
+                      <span><strong>Instagram</strong><small id="instagram-connection-label">Checking connection...</small></span>
                     </span>
-                    <span class="toggle-wrap" title="Instagram is not available in this milestone">
-                      <input id="instagram-enabled" type="checkbox" disabled />
+                    <span class="toggle-wrap" title="Include Instagram Reels">
+                      <input id="instagram-enabled" type="checkbox" />
                       <span class="toggle" aria-hidden="true"></span>
                     </span>
                     <span class="chevron" aria-hidden="true"></span>
                   </summary>
-                  <div class="platform-settings">
-                    <p>Connection and publishing are intentionally not implemented yet.</p>
-                    <button class="connect-button" type="button" data-placeholder="Instagram">Connect Instagram</button>
+                  <div class="platform-settings platform-settings-grid">
+                    <div class="connection-actions">
+                      <button id="instagram-connect" class="connect-button" type="button">Connect Instagram</button>
+                      <button id="instagram-disconnect" class="text-button" type="button" hidden>Disconnect</button>
+                    </div>
+                    <label class="check-field">
+                      <input id="instagram-share-to-feed" type="checkbox" checked />
+                      <span>Also share Reel to feed</span>
+                    </label>
+                    <p class="settings-note">Publishes immediately. Uses the shared caption and JPEG thumbnail as the Reel cover.</p>
                   </div>
                 </details>
 
-                <details class="platform-card is-placeholder">
+                <details class="platform-card">
                   <summary>
                     <span class="platform-identity">
                       <span class="platform-icon tiktok" aria-hidden="true">TT</span>
-                      <span><strong>TikTok</strong><small>Placeholder only</small></span>
+                      <span><strong>TikTok</strong><small id="tiktok-connection-label">Checking connection...</small></span>
                     </span>
-                    <span class="toggle-wrap" title="TikTok is not available in this milestone">
-                      <input id="tiktok-enabled" type="checkbox" disabled />
+                    <span class="toggle-wrap" title="Include TikTok">
+                      <input id="tiktok-enabled" type="checkbox" />
                       <span class="toggle" aria-hidden="true"></span>
                     </span>
                     <span class="chevron" aria-hidden="true"></span>
                   </summary>
-                  <div class="platform-settings">
-                    <p>Connection and publishing are intentionally not implemented yet.</p>
-                    <button class="connect-button" type="button" data-placeholder="TikTok">Connect TikTok</button>
+                  <div class="platform-settings platform-settings-grid">
+                    <div class="connection-actions">
+                      <button id="tiktok-connect" class="connect-button" type="button">Connect TikTok</button>
+                      <button id="tiktok-disconnect" class="text-button" type="button" hidden>Disconnect</button>
+                    </div>
+                    <label class="mini-field">
+                      <span>Privacy</span>
+                      <select id="tiktok-privacy" disabled>
+                        <option value="SELF_ONLY">Only me (required while unaudited)</option>
+                      </select>
+                    </label>
+                    <div class="interaction-grid">
+                      <label class="check-field"><input id="tiktok-comments" type="checkbox" /><span>Allow comments</span></label>
+                      <label class="check-field"><input id="tiktok-duet" type="checkbox" /><span>Allow Duet</span></label>
+                      <label class="check-field"><input id="tiktok-stitch" type="checkbox" /><span>Allow Stitch</span></label>
+                    </div>
+                    <label class="mini-field">
+                      <span>Cover frame (milliseconds)</span>
+                      <input id="tiktok-cover-timestamp" type="number" min="0" step="1" value="0" />
+                    </label>
+                    <p id="tiktok-creator-info" class="settings-note">Connect TikTok to load creator posting limits.</p>
+                    <p class="settings-note restriction-note">Publishes immediately through Direct Post with FILE_UPLOAD. Unaudited posts are forced to SELF_ONLY.</p>
                   </div>
                 </details>
               </div>
@@ -226,18 +252,17 @@
                 </div>
                 <div class="progress-track" aria-hidden="true"><span id="progress-bar"></span></div>
                 <div id="upload-result" class="upload-result" hidden>
-                  <span>YouTube video <strong id="result-video-id"></strong></span>
-                  <span>Scheduled <strong id="result-scheduled-at"></strong></span>
+                  <div id="result-platforms"></div>
                   <span id="result-cleanup"></span>
                   <span id="result-warnings" class="result-warnings" hidden></span>
                 </div>
               </div>
 
               <button id="save-button" class="primary-button" type="submit">
-                <span>Upload &amp; schedule</span>
+                <span>Upload &amp; publish</span>
                 <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14m-5-5 5 5-5 5" /></svg>
               </button>
-              <p class="submit-note">8 GB hard R2 cap - deleted after YouTube verifies - 7-day fallback cleanup.</p>
+              <p class="submit-note">8 GB hard R2 cap - deleted after all selected transfers release it - 7-day fallback.</p>
             </section>
           </aside>
         </form>

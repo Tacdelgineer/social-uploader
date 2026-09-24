@@ -87,8 +87,17 @@ describe("draft validation", () => {
     description: "Caption",
     scheduledAt: "2026-10-01T19:30:00.000Z",
     timezone: "America/Los_Angeles",
+    videoDurationSeconds: 30,
     platforms: { youtube: true, instagram: false, tiktok: false },
     youtube: { visibility: "public", madeForKids: false },
+    instagram: { shareToFeed: true },
+    tiktok: {
+      privacy: "SELF_ONLY",
+      allowComments: false,
+      allowDuet: false,
+      allowStitch: false,
+      coverTimestampMs: 0,
+    },
     assets: {
       video: { key: `uploads/${id}/video.mp4`, originalName: "short.mp4", contentType: "video/mp4", size: 123 },
       thumbnail: { key: `uploads/${id}/thumbnail.png`, originalName: "cover.png", contentType: "image/png", size: 45 },
@@ -99,7 +108,7 @@ describe("draft validation", () => {
     expect(validateDraftRequest(validDraft, new Date("2026-09-23T00:00:00.000Z"))).not.toBeNull();
   });
 
-  it("requires YouTube only and job-scoped asset keys", () => {
+  it("requires at least one platform and job-scoped asset keys", () => {
     expect(
       validateDraftRequest(
         { ...validDraft, platforms: { youtube: false, instagram: false, tiktok: false } },
@@ -112,6 +121,28 @@ describe("draft validation", () => {
         assets: { ...validDraft.assets, video: { ...validDraft.assets.video, key: "uploads/other/video.mp4" } },
       }, new Date("2026-09-23T00:00:00.000Z")),
     ).toBeNull();
+  });
+
+  it("accepts Instagram and TikTok together with a JPEG cover", () => {
+    expect(
+      validateDraftRequest(
+        {
+          ...validDraft,
+          scheduledAt: null,
+          platforms: { youtube: false, instagram: true, tiktok: true },
+          assets: {
+            ...validDraft.assets,
+            thumbnail: {
+              key: `uploads/${id}/thumbnail.jpg`,
+              originalName: "cover.jpg",
+              contentType: "image/jpeg",
+              size: 45,
+            },
+          },
+        },
+        new Date("2026-09-23T00:00:00.000Z"),
+      ),
+    ).not.toBeNull();
   });
 
   it("requires a future native schedule and YouTube-compatible thumbnail", () => {

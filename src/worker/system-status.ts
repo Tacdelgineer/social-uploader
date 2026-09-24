@@ -8,18 +8,20 @@ import type {
 import { getTemporaryStorageMetrics } from "./capacity";
 import type { Env } from "./env";
 import { listAppEvents } from "./events";
+import { instagramConnectionStatus } from "./instagram-oauth";
 import { youtubeConnectionStatus } from "./oauth";
+import { tiktokConnectionStatus } from "./tiktok-oauth";
 
 const JOB_PREFIX = "job:";
 
 export async function getSystemStatus(env: Env): Promise<SystemStatusResponse> {
-  const [storage, jobs, events, youtube, instagramToken, tiktokToken] = await Promise.all([
+  const [storage, jobs, events, youtube, instagram, tiktok] = await Promise.all([
     getTemporaryStorageMetrics(env.UPLOADS),
     listRecentJobs(env),
     listAppEvents(env, 50),
     youtubeConnectionStatus(env),
-    env.METADATA.get("oauth:instagram"),
-    env.METADATA.get("oauth:tiktok"),
+    instagramConnectionStatus(env),
+    tiktokConnectionStatus(env),
   ]);
 
   return {
@@ -27,8 +29,8 @@ export async function getSystemStatus(env: Env): Promise<SystemStatusResponse> {
     storage,
     connections: {
       youtube: youtube.connected,
-      instagram: Boolean(instagramToken),
-      tiktok: Boolean(tiktokToken),
+      instagram: instagram.connected,
+      tiktok: tiktok.connected,
     },
     jobs,
     recentErrors: events.filter((event) => event.level === "error").slice(0, 20),
@@ -57,17 +59,20 @@ async function listRecentJobs(env: Env): Promise<SystemJobSummary[]> {
 }
 
 function summarizeJob(job: StoredJob): SystemJobSummary {
-  const platform = (Object.entries(job.platforms).find(([, enabled]) => enabled)?.[0] ??
-    "youtube") as Platform;
+  const platforms = (Object.entries(job.platforms) as Array<[Platform, boolean]>)
+    .filter(([, enabled]) => enabled)
+    .map(([platform]) => platform);
+  const platform = platforms[0] ?? "youtube";
   return {
     id: job.id,
     platform,
+    platforms,
     status: normalizeStatus(job.status),
     fileSizeBytes: job.assets.video.size,
     createdAt: job.createdAt,
     scheduledAt: job.youtubeResult?.publishAt ?? job.scheduledAt,
-    temporaryMediaDeleted: job.youtubeResult?.mediaDeleted ?? false,
-    videoId: job.youtubeResult?.videoId,
+    temporaryMediaDeleted: job.mediaDeleted ?? job.youtubeResult?.mediaDeleted ?? false,
+    videoId: job.youtubeResult?.videoId ?? job.instagramResult?.mediaId ?? job.tiktokResult?.postIds[0],
     lastError: job.lastError,
   };
 }

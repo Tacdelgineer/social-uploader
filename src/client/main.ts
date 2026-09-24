@@ -1,5 +1,7 @@
 import "./styles.css";
 import {
+  INSTAGRAM_COVER_MAX_BYTES,
+  INSTAGRAM_VIDEO_MAX_BYTES,
   THUMBNAIL_MAX_BYTES,
   VIDEO_CONTENT_TYPES,
   VIDEO_MAX_BYTES,
@@ -8,10 +10,16 @@ import {
   type CompleteYouTubeResponse,
   type CreateJobResponse,
   type DraftRequest,
+  type InstagramPublishResponse,
+  type Platform,
+  type PlatformConnectionStatus,
   type PresignRequest,
   type PresignResponse,
   type StoredJob,
   type SystemStatusResponse,
+  type TikTokCreatorInfo,
+  type TikTokPublishStatusResponse,
+  type TikTokStartResponse,
   type YouTubeConnectionStatus,
 } from "../shared/contracts";
 
@@ -37,31 +45,40 @@ const toast = requiredElement<HTMLElement>("toast");
 const youtubeConnect = requiredElement<HTMLButtonElement>("youtube-connect");
 const youtubeDisconnect = requiredElement<HTMLButtonElement>("youtube-disconnect");
 const youtubeConnectionLabel = requiredElement<HTMLElement>("youtube-connection-label");
+const instagramConnect = requiredElement<HTMLButtonElement>("instagram-connect");
+const instagramDisconnect = requiredElement<HTMLButtonElement>("instagram-disconnect");
+const instagramConnectionLabel = requiredElement<HTMLElement>("instagram-connection-label");
+const tiktokConnect = requiredElement<HTMLButtonElement>("tiktok-connect");
+const tiktokDisconnect = requiredElement<HTMLButtonElement>("tiktok-disconnect");
+const tiktokConnectionLabel = requiredElement<HTMLElement>("tiktok-connection-label");
 
 let videoFile: File | null = null;
 let thumbnailFile: File | null = null;
 let thumbnailObjectUrl: string | null = null;
 let youtubeConnected = false;
+let instagramConnected = false;
+let tiktokConnected = false;
+let videoDurationSeconds = 0;
+let tiktokCreatorInfo: TikTokCreatorInfo | null = null;
 let toastTimer: number | undefined;
 let currentPercent = 0;
 let activeJobId: string | null = null;
 let cancelRequested = false;
 const activeXhrs = new Set<XMLHttpRequest>();
+const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
 
 setupDropzone(videoDropzone, videoInput, setVideo);
 setupDropzone(thumbnailDropzone, thumbnailInput, setThumbnail);
 setupViewNavigation();
 setScheduleMinimum();
-void refreshYouTubeStatus();
+updateScheduleRequirement();
+void refreshConnectionStatuses();
 showOAuthResult();
 
 titleInput.addEventListener("input", () => updateCount("title-count", titleInput.value.length));
 descriptionInput.addEventListener("input", () =>
   updateCount("description-count", descriptionInput.value.length),
 );
-
-const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
-requiredElement<HTMLElement>("timezone-label").textContent = `Scheduled in ${timezone}`;
 
 youtubeConnect.addEventListener("click", () => {
   window.location.assign("/api/oauth/youtube/start");
@@ -80,11 +97,29 @@ youtubeDisconnect.addEventListener("click", async () => {
   }
 });
 
-document.querySelectorAll<HTMLButtonElement>("[data-placeholder]").forEach((button) => {
-  button.addEventListener("click", () => {
-    showToast(`${button.dataset.placeholder ?? "Platform"} remains a placeholder in Milestone 2.`);
-  });
+instagramConnect.addEventListener("click", () => {
+  window.location.assign("/api/oauth/instagram/start");
 });
+
+instagramDisconnect.addEventListener("click", async () => {
+  await disconnectPlatform("instagram", instagramDisconnect);
+});
+
+tiktokConnect.addEventListener("click", () => {
+  window.location.assign("/api/oauth/tiktok/start");
+});
+
+tiktokDisconnect.addEventListener("click", async () => {
+  await disconnectPlatform("tiktok", tiktokDisconnect);
+});
+
+requiredElement<HTMLInputElement>("tiktok-enabled").addEventListener("change", () => {
+  if (requiredElement<HTMLInputElement>("tiktok-enabled").checked && tiktokConnected) {
+    void refreshTikTokCreatorInfo();
+  }
+});
+
+requiredElement<HTMLInputElement>("youtube-enabled").addEventListener("change", updateScheduleRequirement);
 
 document.querySelectorAll<HTMLInputElement>(".toggle-wrap input").forEach((toggle) => {
   toggle.addEventListener("click", (event) => event.stopPropagation());
@@ -111,6 +146,8 @@ form.addEventListener("submit", async (event) => {
   currentPercent = 0;
   uploadResult.hidden = true;
   const jobId = crypto.randomUUID();
+  const selected = selectedPlatforms();
+  const platformErrors: string[] = [];
 
   try {
     setProgress("uploading", "Reserving capped temporary storage...", 3);
@@ -132,7 +169,7 @@ form.addEventListener("submit", async (event) => {
     ]);
     throwIfCancelled();
 
-    setProgress("uploading", "Creating YouTube upload session...", 48);
+    setProgress("uploading", "Creating provider upload job...", 48);
     const job = buildJob(jobId, videoUpload.objectKey, thumbnailUpload.objectKey);
     const created = await apiRequest<CreateJobResponse>("/api/jobs", {
       method: "POST",
@@ -141,41 +178,51 @@ form.addEventListener("submit", async (event) => {
     activeJobId = created.id;
     throwIfCancelled();
 
-    setProgress("uploading", "Uploading video directly to YouTube...", 52);
-    const videoId = await uploadDirectToYouTube(
-      created.youtube.uploadUrl,
-      created.youtube.accessToken,
-      videoFile!,
-      (value) => setProgress("uploading", "Uploading video directly to YouTube...", 52 + Math.round(value * 39)),
-    );
-    throwIfCancelled();
-
-    setProgress("processing", "YouTube received the video; verifying its schedule...", 94);
-    const completed = await apiRequest<CompleteYouTubeResponse>(
-      `/api/jobs/${encodeURIComponent(jobId)}/youtube/complete`,
-      { method: "POST", body: JSON.stringify({ videoId }) },
-    );
-    showScheduledResult(completed);
-  } catch (error) {
-    const recovered = activeJobId ? await recoverScheduledJob(activeJobId) : null;
-    if (recovered) {
-      showScheduledResult(recovered);
-    } else {
-      const message = errorMessage(error);
-      const finalState: UploadState = cancelRequested ? "cancelled" : "failed";
-      setProgress(
-        finalState,
-        finalState === "cancelled" ? "Upload cancelled" : "Upload failed",
-        currentPercent,
-      );
-      if (activeJobId) await reportJobState(activeJobId, finalState, message);
-      showToast(
-        finalState === "cancelled"
-          ? "Upload cancelled. Temporary files remain covered by the 7-day cleanup fallback."
-          : `${message} Temporary files remain protected by 7-day cleanup.`,
-        finalState === "failed",
-      );
+    if (selected.includes("youtube")) {
+      try {
+        await runYouTubeUpload(jobId, created);
+      } catch (error) {
+        if (cancelRequested) throw error;
+        platformErrors.push(`YouTube: ${errorMessage(error)}`);
+        await reportPlatformFailure(jobId, "youtube", errorMessage(error));
+      }
     }
+    if (selected.includes("instagram")) {
+      try {
+        await runInstagramPublish(jobId);
+      } catch (error) {
+        if (cancelRequested) throw error;
+        platformErrors.push(`Instagram: ${errorMessage(error)}`);
+        await reportPlatformFailure(jobId, "instagram", errorMessage(error));
+      }
+    }
+    if (selected.includes("tiktok")) {
+      try {
+        await runTikTokPublish(jobId);
+      } catch (error) {
+        if (cancelRequested) throw error;
+        platformErrors.push(`TikTok: ${errorMessage(error)}`);
+        await reportPlatformFailure(jobId, "tiktok", errorMessage(error));
+      }
+    }
+
+    const finalJob = await apiRequest<StoredJob>(`/api/jobs/${encodeURIComponent(jobId)}`);
+    showJobResult(finalJob, platformErrors);
+  } catch (error) {
+    const message = errorMessage(error);
+    const finalState: UploadState = cancelRequested ? "cancelled" : "failed";
+    setProgress(
+      finalState,
+      finalState === "cancelled" ? "Upload cancelled" : "Upload failed",
+      currentPercent,
+    );
+    if (activeJobId) await reportJobState(activeJobId, finalState, message);
+    showToast(
+      finalState === "cancelled"
+        ? "Upload cancelled. Temporary files remain covered by the 7-day cleanup fallback."
+        : `${message} Temporary files remain protected by 7-day cleanup.`,
+      finalState === "failed",
+    );
   } finally {
     setBusy(false);
     activeJobId = null;
@@ -242,9 +289,22 @@ function setVideo(file: File): void {
     return;
   }
   videoFile = file;
+  videoDurationSeconds = 0;
   requiredElement<HTMLElement>("video-name").textContent = file.name;
-  requiredElement<HTMLElement>("video-meta").textContent = `${formatBytes(file.size)} - MP4 ready`;
+  requiredElement<HTMLElement>("video-meta").textContent = `${formatBytes(file.size)} - reading duration...`;
   videoDropzone.classList.add("has-file");
+  void readVideoDuration(file)
+    .then((duration) => {
+      if (videoFile !== file) return;
+      videoDurationSeconds = duration;
+      requiredElement<HTMLElement>("video-meta").textContent =
+        `${formatBytes(file.size)} - ${formatDuration(duration)} - MP4 ready`;
+    })
+    .catch(() => {
+      if (videoFile === file) {
+        requiredElement<HTMLElement>("video-meta").textContent = `${formatBytes(file.size)} - could not read duration`;
+      }
+    });
 }
 
 function setThumbnail(file: File): void {
@@ -267,13 +327,24 @@ function setThumbnail(file: File): void {
 }
 
 function validateForm(): boolean {
-  if (!youtubeConnected) {
-    showToast("Connect YouTube before uploading.", true);
+  const platforms = selectedPlatforms();
+  if (platforms.length === 0) {
+    showToast("Choose at least one destination.", true);
+    return false;
+  }
+  if (platforms.includes("youtube") && !youtubeConnected) {
+    showToast("Connect YouTube or turn it off for this post.", true);
     youtubeConnect.focus();
     return false;
   }
-  if (!requiredElement<HTMLInputElement>("youtube-enabled").checked) {
-    showToast("Enable YouTube for this milestone.", true);
+  if (platforms.includes("instagram") && !instagramConnected) {
+    showToast("Connect Instagram or turn it off for this post.", true);
+    instagramConnect.focus();
+    return false;
+  }
+  if (platforms.includes("tiktok") && !tiktokConnected) {
+    showToast("Connect TikTok or turn it off for this post.", true);
+    tiktokConnect.focus();
     return false;
   }
   if (!videoFile) {
@@ -286,9 +357,46 @@ function validateForm(): boolean {
     thumbnailDropzone.focus();
     return false;
   }
+  if (!videoDurationSeconds) {
+    showToast("Wait for the video duration to finish loading, or choose the MP4 again.", true);
+    return false;
+  }
+  if (platforms.includes("instagram")) {
+    if (videoFile.size > INSTAGRAM_VIDEO_MAX_BYTES) {
+      showToast("Instagram Reels API currently limits video files to 300 MB.", true);
+      return false;
+    }
+    if (videoDurationSeconds < 3 || videoDurationSeconds > 15 * 60) {
+      showToast("Instagram Reels must be between 3 seconds and 15 minutes.", true);
+      return false;
+    }
+    if (thumbnailFile.type !== "image/jpeg" || thumbnailFile.size > INSTAGRAM_COVER_MAX_BYTES) {
+      showToast("Instagram Reel covers must be JPEG and no larger than 8 MB.", true);
+      return false;
+    }
+  }
+  if (platforms.includes("tiktok")) {
+    if (!tiktokCreatorInfo) {
+      showToast("Wait for TikTok creator settings to load.", true);
+      void refreshTikTokCreatorInfo();
+      return false;
+    }
+    if (videoDurationSeconds > tiktokCreatorInfo.maxVideoDurationSeconds) {
+      showToast(`This TikTok creator allows up to ${tiktokCreatorInfo.maxVideoDurationSeconds} seconds.`, true);
+      return false;
+    }
+    const coverTimestamp = Number(requiredElement<HTMLInputElement>("tiktok-cover-timestamp").value);
+    if (!Number.isSafeInteger(coverTimestamp) || coverTimestamp < 0 || coverTimestamp >= videoDurationSeconds * 1000) {
+      showToast("TikTok cover timestamp must be a whole millisecond inside the video.", true);
+      return false;
+    }
+  }
   if (!form.reportValidity()) return false;
-  const publishAt = new Date(scheduledAtInput.value);
-  if (Number.isNaN(publishAt.getTime()) || publishAt.getTime() <= Date.now() + 60_000) {
+  const publishAt = scheduledAtInput.value ? new Date(scheduledAtInput.value) : null;
+  if (
+    platforms.includes("youtube") &&
+    (!publishAt || Number.isNaN(publishAt.getTime()) || publishAt.getTime() <= Date.now() + 60_000)
+  ) {
     showToast("Choose a publish time at least one minute in the future.", true);
     scheduledAtInput.focus();
     return false;
@@ -297,16 +405,32 @@ function validateForm(): boolean {
 }
 
 function buildJob(jobId: string, videoKey: string, thumbnailKey: string): DraftRequest {
+  const platforms = selectedPlatforms();
   return {
     id: jobId,
     title: titleInput.value.trim(),
     description: descriptionInput.value,
-    scheduledAt: new Date(scheduledAtInput.value).toISOString(),
+    scheduledAt: scheduledAtInput.value ? new Date(scheduledAtInput.value).toISOString() : null,
     timezone,
-    platforms: { youtube: true, instagram: false, tiktok: false },
+    videoDurationSeconds,
+    platforms: {
+      youtube: platforms.includes("youtube"),
+      instagram: platforms.includes("instagram"),
+      tiktok: platforms.includes("tiktok"),
+    },
     youtube: {
       visibility: "public",
       madeForKids: requiredElement<HTMLSelectElement>("youtube-made-for-kids").value === "true",
+    },
+    instagram: {
+      shareToFeed: requiredElement<HTMLInputElement>("instagram-share-to-feed").checked,
+    },
+    tiktok: {
+      privacy: "SELF_ONLY",
+      allowComments: requiredElement<HTMLInputElement>("tiktok-comments").checked,
+      allowDuet: requiredElement<HTMLInputElement>("tiktok-duet").checked,
+      allowStitch: requiredElement<HTMLInputElement>("tiktok-stitch").checked,
+      coverTimestampMs: Number(requiredElement<HTMLInputElement>("tiktok-cover-timestamp").value),
     },
     assets: {
       video: toAsset(videoKey, videoFile!),
@@ -360,6 +484,126 @@ async function uploadDirectToYouTube(
   return videoId;
 }
 
+async function runYouTubeUpload(jobId: string, created: CreateJobResponse): Promise<void> {
+  if (!created.youtube) throw new Error("The Worker did not return a YouTube upload session.");
+  setProgress("uploading", "Uploading video directly to YouTube...", 52);
+  const videoId = await uploadDirectToYouTube(
+    created.youtube.uploadUrl,
+    created.youtube.accessToken,
+    videoFile!,
+    (value) => setProgress("uploading", "Uploading video directly to YouTube...", 52 + Math.round(value * 12)),
+  );
+  throwIfCancelled();
+  setProgress("processing", "YouTube received the video; verifying its native schedule...", 65);
+  await apiRequest<CompleteYouTubeResponse>(
+    `/api/jobs/${encodeURIComponent(jobId)}/youtube/complete`,
+    { method: "POST", body: JSON.stringify({ videoId }) },
+  );
+}
+
+async function runInstagramPublish(jobId: string): Promise<void> {
+  setProgress("processing", "Instagram is fetching the Reel and cover from temporary storage...", 68);
+  let result = await apiRequest<InstagramPublishResponse>(
+    `/api/jobs/${encodeURIComponent(jobId)}/instagram/start`,
+    { method: "POST", body: "{}" },
+  );
+  for (let attempt = 0; result.status !== "published" && attempt < 5; attempt += 1) {
+    await delay(60_000);
+    throwIfCancelled();
+    setProgress("processing", `Instagram is processing the Reel (${attempt + 1}/5)...`, 68 + (attempt + 1) * 2);
+    result = await apiRequest<InstagramPublishResponse>(
+      `/api/jobs/${encodeURIComponent(jobId)}/instagram/status`,
+      { method: "POST", body: "{}" },
+    );
+  }
+  if (result.status !== "published") {
+    showToast("Instagram is still processing. Its job remains visible in System status.");
+  }
+}
+
+async function runTikTokPublish(jobId: string): Promise<void> {
+  setProgress("processing", "Querying TikTok creator settings and initializing SELF_ONLY Direct Post...", 80);
+  const initialized = await apiRequest<TikTokStartResponse>(
+    `/api/jobs/${encodeURIComponent(jobId)}/tiktok/start`,
+    { method: "POST", body: "{}" },
+  );
+  setProgress("uploading", "Uploading the video to TikTok with FILE_UPLOAD...", 82);
+  await uploadDirectToTikTok(initialized, videoFile!, (value) => {
+    setProgress("uploading", "Uploading the video to TikTok with FILE_UPLOAD...", 82 + Math.round(value * 12));
+  });
+  throwIfCancelled();
+  await delay(2_000);
+  let status = await apiRequest<TikTokPublishStatusResponse>(
+    `/api/jobs/${encodeURIComponent(jobId)}/tiktok/uploaded`,
+    { method: "POST", body: "{}" },
+  );
+  for (let attempt = 0; !status.publishComplete && attempt < 60; attempt += 1) {
+    await delay(5_000);
+    throwIfCancelled();
+    setProgress("processing", "TikTok has the file and is processing the private post...", 95 + Math.min(3, attempt / 20));
+    status = await apiRequest<TikTokPublishStatusResponse>(
+      `/api/jobs/${encodeURIComponent(jobId)}/tiktok/status`,
+      { method: "POST", body: "{}" },
+    );
+  }
+  if (!status.publishComplete) {
+    showToast("TikTok is still processing. The uploaded file is already in TikTok custody.");
+  }
+}
+
+async function uploadDirectToTikTok(
+  initialized: TikTokStartResponse,
+  file: File,
+  onProgress: (value: number) => void,
+): Promise<void> {
+  for (let index = 0; index < initialized.totalChunkCount; index += 1) {
+    throwIfCancelled();
+    const start = index * initialized.chunkSize;
+    const end = index === initialized.totalChunkCount - 1
+      ? file.size
+      : Math.min(file.size, start + initialized.chunkSize);
+    const chunk = file.slice(start, end, file.type);
+    await uploadTikTokChunk(initialized.uploadUrl, chunk, start, end, file.size, index, initialized.totalChunkCount);
+    onProgress(end / file.size);
+  }
+}
+
+function uploadTikTokChunk(
+  url: string,
+  chunk: Blob,
+  start: number,
+  end: number,
+  total: number,
+  index: number,
+  totalChunks: number,
+): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    activeXhrs.add(xhr);
+    xhr.open("PUT", url);
+    xhr.setRequestHeader("Content-Type", "video/mp4");
+    xhr.setRequestHeader("Content-Range", `bytes ${start}-${end - 1}/${total}`);
+    xhr.addEventListener("load", () => {
+      activeXhrs.delete(xhr);
+      const expected = index === totalChunks - 1 ? 201 : 206;
+      if (xhr.status !== expected) {
+        reject(new Error(`TikTok rejected FILE_UPLOAD chunk ${index + 1}/${totalChunks} (HTTP ${xhr.status}).`));
+        return;
+      }
+      resolve();
+    });
+    xhr.addEventListener("error", () => {
+      activeXhrs.delete(xhr);
+      reject(new Error(`TikTok FILE_UPLOAD chunk ${index + 1}/${totalChunks} was interrupted.`));
+    });
+    xhr.addEventListener("abort", () => {
+      activeXhrs.delete(xhr);
+      reject(new Error("TikTok FILE_UPLOAD was cancelled."));
+    });
+    xhr.send(chunk);
+  });
+}
+
 function uploadWithXhr(
   url: string,
   file: File,
@@ -411,30 +655,6 @@ async function apiRequest<T>(path: string, init: RequestInit = {}): Promise<T> {
   return payload as T;
 }
 
-async function recoverScheduledJob(jobId: string): Promise<CompleteYouTubeResponse | null> {
-  for (let attempt = 0; attempt < 3; attempt += 1) {
-    if (attempt > 0) await delay(700);
-    try {
-      const job = await apiRequest<StoredJob>(`/api/jobs/${encodeURIComponent(jobId)}`);
-      if ((job.status === "scheduled" || job.status === "scheduled_on_youtube") && job.youtubeResult) {
-        return {
-          id: job.id,
-          status: "scheduled",
-          videoId: job.youtubeResult.videoId,
-          publishAt: job.youtubeResult.publishAt,
-          mediaDeleted: job.youtubeResult.mediaDeleted ?? job.status === "scheduled_on_youtube",
-          thumbnailApplied: job.youtubeResult.thumbnailApplied,
-          warnings: job.youtubeResult.warnings ?? [],
-        };
-      }
-      if (job.status === "failed" || job.status === "cancelled") return null;
-    } catch {
-      // A lost completion response may briefly race KV visibility; retry a few times.
-    }
-  }
-  return null;
-}
-
 async function reportJobState(
   jobId: string,
   status: "failed" | "cancelled",
@@ -450,38 +670,93 @@ async function reportJobState(
   }
 }
 
-function showScheduledResult(completed: CompleteYouTubeResponse): void {
-  setProgress(
-    "scheduled",
-    completed.mediaDeleted
-      ? "Scheduled successfully; temporary media deleted"
-      : "Scheduled successfully; R2 cleanup needs attention",
-    100,
+async function reportPlatformFailure(jobId: string, platform: Platform, error: string): Promise<void> {
+  try {
+    await apiRequest(`/api/jobs/${encodeURIComponent(jobId)}`, {
+      method: "POST",
+      body: JSON.stringify({ status: "failed", platform, error }),
+    });
+  } catch {
+    // Provider endpoints also persist terminal failures; this is a best-effort fallback.
+  }
+}
+
+function showJobResult(job: StoredJob, operationErrors: string[]): void {
+  const succeeded = Object.values(job.platformStatus ?? {}).some(
+    (status) => status === "scheduled" || status === "published",
   );
-  requiredElement<HTMLElement>("result-video-id").textContent = completed.videoId;
-  requiredElement<HTMLElement>("result-scheduled-at").textContent = formatDate(completed.publishAt);
-  requiredElement<HTMLElement>("result-cleanup").textContent = completed.mediaDeleted
+  const stillProcessing = Object.values(job.platformStatus ?? {}).some(
+    (status) => status === "uploading" || status === "processing" || status === "pending",
+  );
+  const state: UploadState = stillProcessing ? "processing" : succeeded && job.status !== "partial" ? "scheduled" : "failed";
+  const label = stillProcessing
+    ? "Providers accepted the transfer; processing continues"
+    : job.status === "completed"
+      ? "All selected platforms accepted the post"
+      : succeeded
+        ? "Finished with platform errors"
+        : "All selected platforms failed";
+  setProgress(state, label, 100);
+
+  const results = requiredElement<HTMLElement>("result-platforms");
+  results.replaceChildren();
+  for (const platform of selectedPlatformsFromJob(job)) {
+    const row = document.createElement("span");
+    const status = job.platformStatus?.[platform] ?? "unknown";
+    if (platform === "youtube" && job.youtubeResult) {
+      row.textContent = `YouTube scheduled ${job.youtubeResult.videoId} for ${formatDate(job.youtubeResult.publishAt)}`;
+    } else if (platform === "instagram" && job.instagramResult?.mediaId) {
+      row.textContent = `Instagram published Reel ${job.instagramResult.mediaId}`;
+    } else if (platform === "tiktok" && job.tiktokResult) {
+      row.textContent = job.tiktokResult.status === "PUBLISH_COMPLETE"
+        ? `TikTok published ${job.tiktokResult.publishId} as SELF_ONLY`
+        : `TikTok ${job.tiktokResult.publishId}: ${humanizeStatus(job.tiktokResult.status)}`;
+    } else {
+      row.textContent = `${capitalize(platform)}: ${humanizeStatus(status)}`;
+    }
+    results.append(row);
+  }
+
+  requiredElement<HTMLElement>("result-cleanup").textContent = job.mediaDeleted
     ? "Temporary video and thumbnail deleted"
     : "Temporary media retained; 7-day cleanup fallback remains active";
+  const warnings = [
+    ...(job.youtubeResult?.warnings ?? []),
+    ...(job.instagramResult?.warnings ?? []),
+    ...(job.tiktokResult?.warnings ?? []),
+    ...operationErrors,
+  ];
   const warningElement = requiredElement<HTMLElement>("result-warnings");
-  warningElement.textContent = completed.warnings.join(" ");
-  warningElement.hidden = completed.warnings.length === 0;
+  warningElement.textContent = warnings.join(" ");
+  warningElement.hidden = warnings.length === 0;
   uploadResult.hidden = false;
-  showToast(
-    completed.warnings.length
-      ? `YouTube scheduled ${completed.videoId} with ${completed.warnings.length} warning(s).`
-      : `YouTube scheduled ${completed.videoId} for ${formatDate(completed.publishAt)}.`,
-  );
+  showToast(label, !succeeded && !stillProcessing);
   resetForm();
 }
 
-async function refreshYouTubeStatus(): Promise<void> {
-  try {
-    const status = await apiRequest<YouTubeConnectionStatus>("/api/oauth/youtube/status");
-    setYouTubeConnection(status.connected);
-  } catch {
+async function refreshConnectionStatuses(): Promise<void> {
+  const [youtube, instagram, tiktok] = await Promise.allSettled([
+    apiRequest<YouTubeConnectionStatus>("/api/oauth/youtube/status"),
+    apiRequest<PlatformConnectionStatus>("/api/oauth/instagram/status"),
+    apiRequest<PlatformConnectionStatus>("/api/oauth/tiktok/status"),
+  ]);
+  if (youtube.status === "fulfilled") setYouTubeConnection(youtube.value.connected);
+  else {
     setYouTubeConnection(false);
     youtubeConnectionLabel.textContent = "Connection check failed";
+  }
+  if (instagram.status === "fulfilled") {
+    setInstagramConnection(instagram.value.connected, instagram.value.displayName);
+  } else {
+    setInstagramConnection(false);
+    instagramConnectionLabel.textContent = "Connection check failed";
+  }
+  if (tiktok.status === "fulfilled") {
+    setTikTokConnection(tiktok.value.connected, tiktok.value.displayName);
+    if (tiktok.value.connected) void refreshTikTokCreatorInfo();
+  } else {
+    setTikTokConnection(false);
+    tiktokConnectionLabel.textContent = "Connection check failed";
   }
 }
 
@@ -491,6 +766,61 @@ function setYouTubeConnection(connected: boolean): void {
   youtubeConnectionLabel.classList.toggle("is-connected", connected);
   youtubeConnect.textContent = connected ? "Reconnect YouTube" : "Connect YouTube";
   youtubeDisconnect.hidden = !connected;
+}
+
+function setInstagramConnection(connected: boolean, displayName?: string): void {
+  instagramConnected = connected;
+  instagramConnectionLabel.textContent = connected ? displayName ?? "Connected" : "Not connected";
+  instagramConnectionLabel.classList.toggle("is-connected", connected);
+  instagramConnect.textContent = connected ? "Reconnect Instagram" : "Connect Instagram";
+  instagramDisconnect.hidden = !connected;
+}
+
+function setTikTokConnection(connected: boolean, displayName?: string): void {
+  tiktokConnected = connected;
+  tiktokConnectionLabel.textContent = connected ? displayName ?? "Connected" : "Not connected";
+  tiktokConnectionLabel.classList.toggle("is-connected", connected);
+  tiktokConnect.textContent = connected ? "Reconnect TikTok" : "Connect TikTok";
+  tiktokDisconnect.hidden = !connected;
+  if (!connected) {
+    tiktokCreatorInfo = null;
+    requiredElement<HTMLElement>("tiktok-creator-info").textContent = "Connect TikTok to load creator posting limits.";
+  }
+}
+
+async function disconnectPlatform(platform: "instagram" | "tiktok", button: HTMLButtonElement): Promise<void> {
+  button.disabled = true;
+  try {
+    await apiRequest(`/api/oauth/${platform}/disconnect`, { method: "POST", body: "{}" });
+    if (platform === "instagram") setInstagramConnection(false);
+    else setTikTokConnection(false);
+    showToast(`${capitalize(platform)} disconnected.`);
+  } catch (error) {
+    showToast(errorMessage(error), true);
+  } finally {
+    button.disabled = false;
+  }
+}
+
+async function refreshTikTokCreatorInfo(): Promise<void> {
+  try {
+    const info = await apiRequest<TikTokCreatorInfo>("/api/tiktok/creator-info");
+    tiktokCreatorInfo = info;
+    requiredElement<HTMLElement>("tiktok-creator-info").textContent =
+      `${info.nickname} (@${info.username}) - up to ${info.maxVideoDurationSeconds}s.`;
+    configureTikTokInteraction("tiktok-comments", info.commentDisabled);
+    configureTikTokInteraction("tiktok-duet", info.duetDisabled);
+    configureTikTokInteraction("tiktok-stitch", info.stitchDisabled);
+  } catch (error) {
+    tiktokCreatorInfo = null;
+    requiredElement<HTMLElement>("tiktok-creator-info").textContent = `Creator settings unavailable: ${errorMessage(error)}`;
+  }
+}
+
+function configureTikTokInteraction(id: string, providerDisabled: boolean): void {
+  const input = requiredElement<HTMLInputElement>(id);
+  input.disabled = providerDisabled;
+  if (providerDisabled) input.checked = false;
 }
 
 async function refreshSystemStatus(): Promise<void> {
@@ -548,7 +878,7 @@ function renderJobs(status: SystemStatusResponse): void {
   for (const job of status.jobs) {
     const row = document.createElement("tr");
     const platform = document.createElement("td");
-    platform.textContent = capitalize(job.platform);
+    platform.textContent = (job.platforms ?? [job.platform]).map(capitalize).join(" + ");
     const state = document.createElement("td");
     const badge = document.createElement("span");
     badge.className = `job-state state-${job.status}`;
@@ -612,11 +942,12 @@ function renderEvents(
 
 function showOAuthResult(): void {
   const url = new URL(window.location.href);
-  const result = url.searchParams.get("youtube");
-  if (!result) return;
-  if (result === "connected") showToast("YouTube connected securely.");
-  else showToast(url.searchParams.get("message") ?? "YouTube connection failed.", true);
-  url.searchParams.delete("youtube");
+  const platform = (["youtube", "instagram", "tiktok"] as const).find((name) => url.searchParams.has(name));
+  if (!platform) return;
+  const result = url.searchParams.get(platform);
+  if (result === "connected") showToast(`${capitalize(platform)} connected securely.`);
+  else showToast(url.searchParams.get("message") ?? `${capitalize(platform)} connection failed.`, true);
+  url.searchParams.delete(platform);
   url.searchParams.delete("message");
   window.history.replaceState({}, "", `${url.pathname}${url.search}${url.hash}`);
 }
@@ -638,7 +969,7 @@ function setProgress(state: UploadState, label: string, percent: number): void {
   statusState.textContent = capitalize(state);
   statusState.className = `state-badge state-${state}`;
   statusLabel.textContent = label;
-  statusPercent.textContent = `${currentPercent}%`;
+  statusPercent.textContent = `${Math.round(currentPercent)}%`;
   progressBar.style.width = `${currentPercent}%`;
   uploadStatus.dataset.state = state;
   cancelButton.hidden = !["uploading"].includes(state);
@@ -648,13 +979,14 @@ function setProgress(state: UploadState, label: string, percent: number): void {
 function setBusy(isBusy: boolean): void {
   saveButton.disabled = isBusy;
   form.setAttribute("aria-busy", String(isBusy));
-  saveButton.querySelector("span")!.textContent = isBusy ? "Working..." : "Upload & schedule";
+  saveButton.querySelector("span")!.textContent = isBusy ? "Working..." : "Upload & publish";
   if (!isBusy) cancelButton.hidden = true;
 }
 
 function resetForm(): void {
   form.reset();
   videoFile = null;
+  videoDurationSeconds = 0;
   thumbnailFile = null;
   videoDropzone.classList.remove("has-file");
   thumbnailDropzone.classList.remove("has-file");
@@ -669,6 +1001,7 @@ function resetForm(): void {
   updateCount("title-count", 0);
   updateCount("description-count", 0);
   setScheduleMinimum();
+  updateScheduleRequirement();
 }
 
 function setScheduleMinimum(): void {
@@ -677,6 +1010,45 @@ function setScheduleMinimum(): void {
     .toISOString()
     .slice(0, 16);
   scheduledAtInput.min = local;
+}
+
+function updateScheduleRequirement(): void {
+  const youtubeEnabled = requiredElement<HTMLInputElement>("youtube-enabled").checked;
+  scheduledAtInput.required = youtubeEnabled;
+  requiredElement<HTMLElement>("timezone-label").textContent = youtubeEnabled
+    ? `YouTube schedules in ${timezone}; Instagram and TikTok publish immediately`
+    : "Instagram and TikTok publish immediately; no schedule will be used";
+}
+
+function selectedPlatforms(): Platform[] {
+  return (["youtube", "instagram", "tiktok"] as Platform[]).filter(
+    (platform) => requiredElement<HTMLInputElement>(`${platform}-enabled`).checked,
+  );
+}
+
+function selectedPlatformsFromJob(job: StoredJob): Platform[] {
+  return (Object.entries(job.platforms) as Array<[Platform, boolean]>)
+    .filter(([, enabled]) => enabled)
+    .map(([platform]) => platform);
+}
+
+function readVideoDuration(file: File): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const video = document.createElement("video");
+    const url = URL.createObjectURL(file);
+    video.preload = "metadata";
+    video.addEventListener("loadedmetadata", () => {
+      const duration = video.duration;
+      URL.revokeObjectURL(url);
+      if (!Number.isFinite(duration) || duration <= 0) reject(new Error("Invalid video duration."));
+      else resolve(duration);
+    }, { once: true });
+    video.addEventListener("error", () => {
+      URL.revokeObjectURL(url);
+      reject(new Error("Could not read video metadata."));
+    }, { once: true });
+    video.src = url;
+  });
 }
 
 function showToast(message: string, isError = false): void {
@@ -719,6 +1091,17 @@ function formatBytes(bytes: number): string {
 function formatDate(value: string): string {
   const date = new Date(value);
   return Number.isNaN(date.getTime()) ? value : date.toLocaleString();
+}
+
+function formatDuration(seconds: number): string {
+  const rounded = Math.round(seconds);
+  const minutes = Math.floor(rounded / 60);
+  const remainder = rounded % 60;
+  return minutes ? `${minutes}:${String(remainder).padStart(2, "0")}` : `${remainder}s`;
+}
+
+function humanizeStatus(value: string): string {
+  return value.toLowerCase().replaceAll("_", " ");
 }
 
 function capitalize(value: string): string {

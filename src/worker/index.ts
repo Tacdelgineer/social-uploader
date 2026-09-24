@@ -7,10 +7,14 @@ import type {
   CompleteYouTubeResponse,
   CreateJobResponse,
   DraftRequest,
+  InstagramPublishResponse,
   JobStateUpdateRequest,
+  Platform,
   PresignedUpload,
   PresignResponse,
   StoredJob,
+  TikTokPublishStatusResponse,
+  TikTokStartResponse,
   UploadFileRequest,
 } from "../shared/contracts";
 import {
@@ -21,6 +25,27 @@ import {
 import type { Env } from "./env";
 import { recordAppEvent } from "./events";
 import {
+  beginInstagramOAuth,
+  disconnectInstagram,
+  finishInstagramOAuth,
+  getInstagramCredentials,
+  instagramConnectionStatus,
+} from "./instagram-oauth";
+import {
+  createInstagramReelContainer,
+  getInstagramContainerStatus,
+  publishInstagramReel,
+  verifyInstagramReel,
+} from "./instagram";
+import {
+  cleanupReleasedMedia,
+  jobKey,
+  loadJob,
+  markPlatformFailed,
+  putJobWithRetry,
+  setPlatformStatus,
+} from "./job-store";
+import {
   beginYouTubeOAuth,
   disconnectYouTube,
   finishYouTubeOAuth,
@@ -28,6 +53,18 @@ import {
   youtubeConnectionStatus,
 } from "./oauth";
 import { getSystemStatus } from "./system-status";
+import {
+  beginTikTokOAuth,
+  disconnectTikTok,
+  finishTikTokOAuth,
+  getTikTokCredentials,
+  tiktokConnectionStatus,
+} from "./tiktok-oauth";
+import {
+  fetchTikTokPostStatus,
+  initializeTikTokDirectPost,
+  queryTikTokCreatorInfo,
+} from "./tiktok";
 import { extensionFor, validateDraftRequest, validatePresignRequest } from "./validation";
 import { setYouTubeThumbnail, startYouTubeUpload, verifyYouTubeSchedule } from "./youtube";
 
@@ -60,7 +97,7 @@ async function route(request: Request, env: Env): Promise<Response> {
     return json({
       ok: true,
       service: "social-uploader",
-      milestone: 2,
+      milestone: 3,
       storage: "temporary-r2-and-kv-metadata",
       storageCapBytes: R2_STORAGE_CAP_BYTES,
       cleanupFallbackDays: 7,
@@ -88,6 +125,48 @@ async function route(request: Request, env: Env): Promise<Response> {
     });
     return json({ disconnected: true });
   }
+  if (url.pathname === "/api/oauth/instagram/start" && request.method === "GET") {
+    return beginInstagramOAuth(env);
+  }
+  if (url.pathname === "/api/oauth/instagram/callback" && request.method === "GET") {
+    return finishInstagramOAuth(request, env);
+  }
+  if (url.pathname === "/api/oauth/instagram/status" && request.method === "GET") {
+    return json(await instagramConnectionStatus(env));
+  }
+  if (url.pathname === "/api/oauth/instagram/disconnect" && request.method === "POST") {
+    await disconnectInstagram(env);
+    await recordAppEvent(env, {
+      level: "info",
+      category: "oauth",
+      platform: "instagram",
+      message: "Instagram disconnected.",
+    });
+    return json({ disconnected: true });
+  }
+  if (url.pathname === "/api/oauth/tiktok/start" && request.method === "GET") {
+    return beginTikTokOAuth(env);
+  }
+  if (url.pathname === "/api/oauth/tiktok/callback" && request.method === "GET") {
+    return finishTikTokOAuth(request, env);
+  }
+  if (url.pathname === "/api/oauth/tiktok/status" && request.method === "GET") {
+    return json(await tiktokConnectionStatus(env));
+  }
+  if (url.pathname === "/api/oauth/tiktok/disconnect" && request.method === "POST") {
+    await disconnectTikTok(env);
+    await recordAppEvent(env, {
+      level: "info",
+      category: "oauth",
+      platform: "tiktok",
+      message: "TikTok disconnected.",
+    });
+    return json({ disconnected: true });
+  }
+  if (url.pathname === "/api/tiktok/creator-info" && request.method === "GET") {
+    const { accessToken } = await getTikTokCredentials(env);
+    return json(await queryTikTokCreatorInfo(accessToken));
+  }
   if (url.pathname === "/api/uploads/presign" && request.method === "POST") {
     return createPresignedUpload(request, env);
   }
@@ -104,6 +183,27 @@ async function route(request: Request, env: Env): Promise<Response> {
   const completionMatch = /^\/api\/jobs\/([^/]+)\/youtube\/complete$/u.exec(url.pathname);
   if (completionMatch && request.method === "POST") {
     return completeYouTubeUpload(request, env, completionMatch[1] ?? "");
+  }
+
+  const instagramStartMatch = /^\/api\/jobs\/([^/]+)\/instagram\/start$/u.exec(url.pathname);
+  if (instagramStartMatch && request.method === "POST") {
+    return startInstagramPublish(env, instagramStartMatch[1] ?? "");
+  }
+  const instagramStatusMatch = /^\/api\/jobs\/([^/]+)\/instagram\/status$/u.exec(url.pathname);
+  if (instagramStatusMatch && request.method === "POST") {
+    return checkInstagramPublish(env, instagramStatusMatch[1] ?? "");
+  }
+  const tiktokStartMatch = /^\/api\/jobs\/([^/]+)\/tiktok\/start$/u.exec(url.pathname);
+  if (tiktokStartMatch && request.method === "POST") {
+    return startTikTokPublish(env, tiktokStartMatch[1] ?? "");
+  }
+  const tiktokUploadedMatch = /^\/api\/jobs\/([^/]+)\/tiktok\/uploaded$/u.exec(url.pathname);
+  if (tiktokUploadedMatch && request.method === "POST") {
+    return confirmTikTokUpload(env, tiktokUploadedMatch[1] ?? "");
+  }
+  const tiktokStatusMatch = /^\/api\/jobs\/([^/]+)\/tiktok\/status$/u.exec(url.pathname);
+  if (tiktokStatusMatch && request.method === "POST") {
+    return checkTikTokPublish(env, tiktokStatusMatch[1] ?? "");
   }
 
   if (url.pathname.startsWith("/api/")) {
@@ -200,7 +300,7 @@ async function createJob(request: Request, env: Env): Promise<Response> {
   const input = validateDraftRequest(body);
   if (!input) {
     return json(
-      { error: "Invalid job. Use a future publish time, YouTube only, and a JPG or PNG thumbnail." } satisfies ApiError,
+      { error: "Invalid job or platform-specific media/settings." } satisfies ApiError,
       400,
     );
   }
@@ -211,14 +311,22 @@ async function createJob(request: Request, env: Env): Promise<Response> {
     return json({ error: "A job with this ID already exists." } satisfies ApiError, 409);
   }
 
-  const accessToken = await getYouTubeAccessToken(env);
-  const uploadUrl = await startYouTubeUpload(input, accessToken);
+  const accessToken = input.platforms.youtube ? await getYouTubeAccessToken(env) : undefined;
+  if (input.platforms.instagram) await getInstagramCredentials(env);
+  if (input.platforms.tiktok) await getTikTokCredentials(env);
+  const uploadUrl = accessToken ? await startYouTubeUpload(input, accessToken) : undefined;
   const now = new Date().toISOString();
+  const platformStatus = Object.fromEntries(
+    (Object.entries(input.platforms) as Array<[Platform, boolean]>)
+      .filter(([, enabled]) => enabled)
+      .map(([platform]) => [platform, platform === "youtube" ? "uploading" : "pending"]),
+  ) as StoredJob["platformStatus"];
   const job: StoredJob = {
     ...input,
     title: input.title.trim(),
-    schemaVersion: 3,
+    schemaVersion: 4,
     status: "uploading",
+    platformStatus,
     createdAt: now,
     updatedAt: now,
   };
@@ -226,21 +334,21 @@ async function createJob(request: Request, env: Env): Promise<Response> {
   await recordAppEvent(env, {
     level: "info",
     category: "upload",
-    platform: "youtube",
     jobId: job.id,
-    message: "YouTube upload session created; browser upload started.",
+    message: `Job created for ${enabledPlatforms(job).join(", ")}.`,
   });
 
-  return json({
+  const response: CreateJobResponse = {
     id: job.id,
     status: "uploading",
-    youtube: { uploadUrl, accessToken },
-  } satisfies CreateJobResponse, 201);
+  };
+  if (uploadUrl && accessToken) response.youtube = { uploadUrl, accessToken };
+  return json(response, 201);
 }
 
 async function getJob(env: Env, jobId: string): Promise<Response> {
   if (!UUID_PATTERN.test(jobId)) return json({ error: "Invalid job ID." } satisfies ApiError, 400);
-  const job = await env.METADATA.get<StoredJob>(jobKey(jobId), "json");
+  const job = await loadJob(env, jobId);
   return job ? json(job) : json({ error: "Job not found." } satisfies ApiError, 404);
 }
 
@@ -250,9 +358,23 @@ async function updateJobState(request: Request, env: Env, jobId: string): Promis
   if (!body || !["failed", "cancelled"].includes(body.status ?? "")) {
     return json({ error: "Invalid job state." } satisfies ApiError, 400);
   }
-  const job = await env.METADATA.get<StoredJob>(jobKey(jobId), "json");
+  const job = await loadJob(env, jobId);
   if (!job) return json({ error: "Job not found." } satisfies ApiError, 404);
-  if (["scheduled", "scheduled_on_youtube"].includes(job.status)) return json(job);
+  if (body.platform && !["youtube", "instagram", "tiktok"].includes(body.platform)) {
+    return json({ error: "Invalid platform." } satisfies ApiError, 400);
+  }
+  if (body.status === "failed" && body.platform) {
+    const message = body.error?.slice(0, 500) || `${body.platform} failed.`;
+    const failed = await markPlatformFailed(env, jobId, body.platform, message);
+    await recordAppEvent(env, {
+      level: "error",
+      category: body.platform,
+      platform: body.platform,
+      jobId,
+      message,
+    });
+    return json(failed);
+  }
 
   const status = body.status as JobStateUpdateRequest["status"];
   const updated: StoredJob = {
@@ -265,7 +387,6 @@ async function updateJobState(request: Request, env: Env, jobId: string): Promis
   await recordAppEvent(env, {
     level: status === "failed" ? "error" : "warning",
     category: "upload",
-    platform: "youtube",
     jobId,
     message: status === "failed" ? updated.lastError ?? "Upload failed." : "Upload cancelled by user.",
   });
@@ -279,23 +400,20 @@ async function completeYouTubeUpload(request: Request, env: Env, jobId: string):
     return json({ error: "Invalid YouTube video ID." } satisfies ApiError, 400);
   }
 
-  const job = await env.METADATA.get<StoredJob>(jobKey(jobId), "json");
+  const job = await loadJob(env, jobId);
   if (!job) return json({ error: "Job not found." } satisfies ApiError, 404);
-  if (["scheduled", "scheduled_on_youtube"].includes(job.status) && job.youtubeResult) {
+  if (!job.platforms.youtube) return json({ error: "YouTube is not selected for this job." } satisfies ApiError, 409);
+  if (job.youtubeResult) {
     return json(completionResponse(job));
   }
   if (job.youtubeVideoId && job.youtubeVideoId !== body.videoId) {
     return json({ error: "This job is already associated with a different YouTube video." } satisfies ApiError, 409);
   }
 
-  const processing: StoredJob = {
+  const processing = setPlatformStatus({
     ...job,
-    schemaVersion: 3,
-    status: "processing",
     youtubeVideoId: body.videoId,
-    updatedAt: new Date().toISOString(),
-    lastError: undefined,
-  };
+  }, "youtube", "processing");
   await putJobWithRetry(env, processing);
   await recordAppEvent(env, {
     level: "info",
@@ -312,13 +430,7 @@ async function completeYouTubeUpload(request: Request, env: Env, jobId: string):
     accepted = await verifyYouTubeSchedule(body.videoId, processing, accessToken);
   } catch (error) {
     const message = errorMessage(error);
-    const failed: StoredJob = {
-      ...processing,
-      status: "failed",
-      updatedAt: new Date().toISOString(),
-      lastError: message,
-    };
-    await putJobWithRetry(env, failed);
+    await markPlatformFailed(env, jobId, "youtube", message);
     await recordAppEvent(env, {
       level: "error",
       category: "youtube",
@@ -347,23 +459,9 @@ async function completeYouTubeUpload(request: Request, env: Env, jobId: string):
     warnings.push(`Custom thumbnail was not applied: ${errorMessage(error)}`);
   }
 
-  let mediaDeleted = false;
-  try {
-    await env.UPLOADS.delete([processing.assets.video.key, processing.assets.thumbnail.key]);
-    const [video, thumbnail] = await Promise.all([
-      env.UPLOADS.head(processing.assets.video.key),
-      env.UPLOADS.head(processing.assets.thumbnail.key),
-    ]);
-    mediaDeleted = !video && !thumbnail;
-    if (!mediaDeleted) warnings.push("YouTube accepted the schedule, but temporary R2 cleanup is incomplete.");
-  } catch (error) {
-    warnings.push(`YouTube accepted the schedule, but temporary R2 cleanup failed: ${errorMessage(error)}`);
-  }
-
   const acceptedAt = new Date().toISOString();
-  const completed: StoredJob = {
+  let completed = setPlatformStatus({
     ...processing,
-    status: "scheduled",
     updatedAt: acceptedAt,
     lastError: undefined,
     youtubeResult: {
@@ -373,14 +471,20 @@ async function completeYouTubeUpload(request: Request, env: Env, jobId: string):
       privacyStatus: "private",
       publishAt: accepted.publishAt,
       thumbnailApplied,
-      mediaDeleted,
+      mediaDeleted: false,
       warnings,
     },
-  };
-  try {
+  }, "youtube", "scheduled");
+  await putJobWithRetry(env, completed);
+  const cleanup = await cleanupReleasedMedia(env, completed);
+  completed = cleanup.job;
+  if (cleanup.warning && completed.youtubeResult) {
+    warnings.push(cleanup.warning);
+    completed = {
+      ...completed,
+      youtubeResult: { ...completed.youtubeResult, warnings },
+    };
     await putJobWithRetry(env, completed);
-  } catch (error) {
-    warnings.push(`Schedule succeeded, but status persistence needs a retry: ${errorMessage(error)}`);
   }
   await recordAppEvent(env, {
     level: warnings.length ? "warning" : "info",
@@ -389,7 +493,9 @@ async function completeYouTubeUpload(request: Request, env: Env, jobId: string):
     jobId,
     message: warnings.length
       ? `YouTube scheduled ${accepted.videoId} with ${warnings.length} warning(s).`
-      : `YouTube scheduled ${accepted.videoId}; temporary media deleted.`,
+      : completed.mediaDeleted
+        ? `YouTube scheduled ${accepted.videoId}; temporary media deleted.`
+        : `YouTube scheduled ${accepted.videoId}; temporary media retained for other selected platforms.`,
   });
 
   return json(completionResponse(completed));
@@ -400,13 +506,362 @@ function completionResponse(job: StoredJob): CompleteYouTubeResponse {
   if (!result) throw new Error("The scheduled job has no YouTube result.");
   return {
     id: job.id,
-    status: "scheduled",
+    status: job.status === "completed" ? "completed" : "scheduled",
     videoId: result.videoId,
     publishAt: result.publishAt,
-    mediaDeleted: result.mediaDeleted ?? job.status === "scheduled_on_youtube",
+    mediaDeleted: job.mediaDeleted ?? result.mediaDeleted ?? job.status === "scheduled_on_youtube",
     thumbnailApplied: result.thumbnailApplied,
     warnings: result.warnings ?? [],
   };
+}
+
+async function startInstagramPublish(env: Env, jobId: string): Promise<Response> {
+  if (!UUID_PATTERN.test(jobId)) return json({ error: "Invalid job ID." } satisfies ApiError, 400);
+  const job = await loadJob(env, jobId);
+  if (!job) return json({ error: "Job not found." } satisfies ApiError, 404);
+  if (!job.platforms.instagram) return json({ error: "Instagram is not selected for this job." } satisfies ApiError, 409);
+  if (job.instagramResult) return json(instagramResponse(job));
+
+  try {
+    const credentials = await getInstagramCredentials(env);
+    const [videoUrl, coverUrl] = await Promise.all([
+      signTemporaryDownload(env, job.assets.video.key),
+      signTemporaryDownload(env, job.assets.thumbnail.key),
+    ]);
+    const containerId = await createInstagramReelContainer(
+      job,
+      credentials.userId,
+      credentials.accessToken,
+      videoUrl,
+      coverUrl,
+    );
+    const processing = setPlatformStatus(
+      {
+        ...job,
+        instagramResult: {
+          containerId,
+          statusCode: "IN_PROGRESS",
+          mediaTransferred: false,
+          warnings: [],
+        },
+      },
+      "instagram",
+      "processing",
+    );
+    await putJobWithRetry(env, processing);
+    await recordAppEvent(env, {
+      level: "info",
+      category: "instagram",
+      platform: "instagram",
+      jobId,
+      message: `Instagram Reel container ${containerId} created; Meta is fetching the temporary media.`,
+    });
+    return json(instagramResponse(processing));
+  } catch (error) {
+    return platformFailureResponse(env, jobId, "instagram", error);
+  }
+}
+
+async function checkInstagramPublish(env: Env, jobId: string): Promise<Response> {
+  if (!UUID_PATTERN.test(jobId)) return json({ error: "Invalid job ID." } satisfies ApiError, 400);
+  let job = await loadJob(env, jobId);
+  if (!job) return json({ error: "Job not found." } satisfies ApiError, 404);
+  if (!job.platforms.instagram || !job.instagramResult) {
+    return json({ error: "Start the Instagram Reel transfer first." } satisfies ApiError, 409);
+  }
+  if (job.instagramResult.mediaId) return json(instagramResponse(job));
+
+  try {
+    const credentials = await getInstagramCredentials(env);
+    const container = await getInstagramContainerStatus(
+      job.instagramResult.containerId,
+      credentials.accessToken,
+    );
+    if (["ERROR", "EXPIRED"].includes(container.statusCode)) {
+      throw new Error(
+        `Instagram Reel processing ${container.statusCode.toLowerCase()}${container.detail ? `: ${container.detail}` : "."}`,
+      );
+    }
+    if (container.statusCode === "IN_PROGRESS") {
+      job = {
+        ...job,
+        updatedAt: new Date().toISOString(),
+        instagramResult: { ...job.instagramResult, statusCode: container.statusCode },
+      };
+      await putJobWithRetry(env, job);
+      return json(instagramResponse(job));
+    }
+    if (container.statusCode === "PUBLISHED") {
+      throw new Error("Instagram reports this container as published, but its media ID was not persisted. Check Instagram directly.");
+    }
+    if (container.statusCode !== "FINISHED") {
+      throw new Error(`Instagram returned an unsupported container status: ${container.statusCode}.`);
+    }
+
+    job = {
+      ...job,
+      updatedAt: new Date().toISOString(),
+      instagramResult: {
+        ...job.instagramResult,
+        statusCode: "FINISHED",
+        mediaTransferred: true,
+      },
+    };
+    await putJobWithRetry(env, job);
+    const cleanup = await cleanupReleasedMedia(env, job);
+    job = cleanup.job;
+
+    const mediaId = await publishInstagramReel(
+      credentials.userId,
+      job.instagramResult!.containerId,
+      credentials.accessToken,
+    );
+    const warnings = [
+      ...(job.instagramResult?.warnings ?? []),
+      ...(await verifyInstagramReel(mediaId, credentials.accessToken)),
+    ];
+    if (cleanup.warning) warnings.push(cleanup.warning);
+    job = setPlatformStatus(
+      {
+        ...job,
+        instagramResult: {
+          ...job.instagramResult!,
+          statusCode: "PUBLISHED",
+          mediaId,
+          acceptedAt: new Date().toISOString(),
+          warnings,
+        },
+      },
+      "instagram",
+      "published",
+    );
+    await putJobWithRetry(env, job);
+    await recordAppEvent(env, {
+      level: warnings.length ? "warning" : "info",
+      category: "instagram",
+      platform: "instagram",
+      jobId,
+      message: `Instagram published Reel ${mediaId}${warnings.length ? ` with ${warnings.length} warning(s)` : ""}.`,
+    });
+    return json(instagramResponse(job));
+  } catch (error) {
+    return platformFailureResponse(env, jobId, "instagram", error);
+  }
+}
+
+async function startTikTokPublish(env: Env, jobId: string): Promise<Response> {
+  if (!UUID_PATTERN.test(jobId)) return json({ error: "Invalid job ID." } satisfies ApiError, 400);
+  const job = await loadJob(env, jobId);
+  if (!job) return json({ error: "Job not found." } satisfies ApiError, 404);
+  if (!job.platforms.tiktok) return json({ error: "TikTok is not selected for this job." } satisfies ApiError, 409);
+  if (job.tiktokResult) {
+    return json({ error: "TikTok Direct Post is already initialized for this job." } satisfies ApiError, 409);
+  }
+
+  try {
+    const { accessToken } = await getTikTokCredentials(env);
+    const creatorInfo = await queryTikTokCreatorInfo(accessToken);
+    const initialized = await initializeTikTokDirectPost(job, accessToken, creatorInfo);
+    const uploading = setPlatformStatus(
+      {
+        ...job,
+        tiktokResult: {
+          publishId: initialized.publishId,
+          status: "PROCESSING_UPLOAD",
+          uploadCompleted: false,
+          uploadedBytes: 0,
+          postIds: [],
+          warnings: [],
+        },
+      },
+      "tiktok",
+      "uploading",
+    );
+    await putJobWithRetry(env, uploading);
+    await recordAppEvent(env, {
+      level: "info",
+      category: "tiktok",
+      platform: "tiktok",
+      jobId,
+      message: `TikTok Direct Post ${initialized.publishId} initialized with FILE_UPLOAD and SELF_ONLY privacy.`,
+    });
+    return json({
+      publishId: initialized.publishId,
+      uploadUrl: initialized.uploadUrl,
+      chunkSize: initialized.chunkSize,
+      totalChunkCount: initialized.totalChunkCount,
+      creatorInfo,
+    } satisfies TikTokStartResponse);
+  } catch (error) {
+    return platformFailureResponse(env, jobId, "tiktok", error);
+  }
+}
+
+async function confirmTikTokUpload(env: Env, jobId: string): Promise<Response> {
+  if (!UUID_PATTERN.test(jobId)) return json({ error: "Invalid job ID." } satisfies ApiError, 400);
+  let job = await loadJob(env, jobId);
+  if (!job?.tiktokResult || !job.platforms.tiktok) {
+    return json({ error: "Start the TikTok FILE_UPLOAD first." } satisfies ApiError, 409);
+  }
+
+  try {
+    const { accessToken } = await getTikTokCredentials(env);
+    const status = await fetchTikTokPostStatus(job.tiktokResult.publishId, accessToken);
+    if (status.status === "FAILED") {
+      throw new Error(`TikTok Direct Post failed: ${status.failReason ?? "unknown provider error"}.`);
+    }
+    job = setPlatformStatus(
+      {
+        ...job,
+        tiktokResult: {
+          ...job.tiktokResult,
+          status: status.status,
+          uploadCompleted: true,
+          uploadedBytes: Math.max(status.uploadedBytes, job.assets.video.size),
+          postIds: status.postIds,
+        },
+      },
+      "tiktok",
+      status.status === "PUBLISH_COMPLETE" ? "published" : "processing",
+    );
+    if (status.status === "PUBLISH_COMPLETE" && job.tiktokResult) {
+      job = {
+        ...job,
+        tiktokResult: { ...job.tiktokResult, acceptedAt: new Date().toISOString() },
+      };
+    }
+    await putJobWithRetry(env, job);
+    const cleanup = await cleanupReleasedMedia(env, job);
+    job = await addTikTokCleanupWarning(env, cleanup.job, cleanup.warning);
+    return json(tiktokResponse(job));
+  } catch (error) {
+    return platformFailureResponse(env, jobId, "tiktok", error);
+  }
+}
+
+async function checkTikTokPublish(env: Env, jobId: string): Promise<Response> {
+  if (!UUID_PATTERN.test(jobId)) return json({ error: "Invalid job ID." } satisfies ApiError, 400);
+  let job = await loadJob(env, jobId);
+  if (!job?.tiktokResult || !job.platforms.tiktok) {
+    return json({ error: "Start the TikTok FILE_UPLOAD first." } satisfies ApiError, 409);
+  }
+  if (job.platformStatus?.tiktok === "published") return json(tiktokResponse(job));
+
+  try {
+    const { accessToken } = await getTikTokCredentials(env);
+    const status = await fetchTikTokPostStatus(job.tiktokResult.publishId, accessToken);
+    if (status.status === "FAILED") {
+      throw new Error(`TikTok Direct Post failed: ${status.failReason ?? "unknown provider error"}.`);
+    }
+    const uploadCompleted = job.tiktokResult.uploadCompleted || status.uploadedBytes >= job.assets.video.size;
+    job = setPlatformStatus(
+      {
+        ...job,
+        tiktokResult: {
+          ...job.tiktokResult,
+          status: status.status,
+          uploadCompleted,
+          uploadedBytes: status.uploadedBytes,
+          postIds: status.postIds,
+          acceptedAt: status.status === "PUBLISH_COMPLETE" ? new Date().toISOString() : undefined,
+        },
+      },
+      "tiktok",
+      status.status === "PUBLISH_COMPLETE" ? "published" : "processing",
+    );
+    await putJobWithRetry(env, job);
+    const cleanup = await cleanupReleasedMedia(env, job);
+    job = await addTikTokCleanupWarning(env, cleanup.job, cleanup.warning);
+    if (status.status === "PUBLISH_COMPLETE") {
+      await recordAppEvent(env, {
+        level: job.tiktokResult?.warnings?.length ? "warning" : "info",
+        category: "tiktok",
+        platform: "tiktok",
+        jobId,
+        message: `TikTok completed Direct Post ${job.tiktokResult!.publishId} with SELF_ONLY privacy.`,
+      });
+    }
+    return json(tiktokResponse(job));
+  } catch (error) {
+    return platformFailureResponse(env, jobId, "tiktok", error);
+  }
+}
+
+function instagramResponse(job: StoredJob): InstagramPublishResponse {
+  const result = job.instagramResult;
+  if (!result) throw new Error("Instagram result is missing.");
+  return {
+    status: result.mediaId ? "published" : "processing",
+    containerId: result.containerId,
+    statusCode: result.statusCode,
+    mediaId: result.mediaId,
+    mediaDeleted: job.mediaDeleted ?? false,
+    warnings: result.warnings ?? [],
+  };
+}
+
+function tiktokResponse(job: StoredJob): TikTokPublishStatusResponse {
+  const result = job.tiktokResult;
+  if (!result) throw new Error("TikTok result is missing.");
+  return {
+    status: result.status,
+    publishComplete: result.status === "PUBLISH_COMPLETE",
+    uploadCompleted: result.uploadCompleted,
+    uploadedBytes: result.uploadedBytes,
+    postIds: result.postIds,
+    mediaDeleted: job.mediaDeleted ?? false,
+    warnings: result.warnings ?? [],
+  };
+}
+
+async function addTikTokCleanupWarning(
+  env: Env,
+  job: StoredJob,
+  warning?: string,
+): Promise<StoredJob> {
+  if (!warning || !job.tiktokResult) return job;
+  const warnings = [...(job.tiktokResult.warnings ?? [])];
+  if (!warnings.includes(warning)) warnings.push(warning);
+  const updated = { ...job, tiktokResult: { ...job.tiktokResult, warnings } };
+  await putJobWithRetry(env, updated);
+  return updated;
+}
+
+async function platformFailureResponse(
+  env: Env,
+  jobId: string,
+  platform: "instagram" | "tiktok",
+  error: unknown,
+): Promise<Response> {
+  const message = errorMessage(error);
+  await markPlatformFailed(env, jobId, platform, message);
+  await recordAppEvent(env, {
+    level: "error",
+    category: platform,
+    platform,
+    jobId,
+    message,
+  });
+  return json({ error: `${message} Temporary source media remains covered by 7-day cleanup.` } satisfies ApiError, 502);
+}
+
+async function signTemporaryDownload(env: Env, objectKey: string): Promise<string> {
+  const endpoint = `https://${env.R2_ACCOUNT_ID}.r2.cloudflarestorage.com`;
+  const client = new AwsClient({
+    accessKeyId: env.R2_ACCESS_KEY_ID,
+    secretAccessKey: env.R2_SECRET_ACCESS_KEY,
+    service: "s3",
+    region: "auto",
+  });
+  const url = `${endpoint}/${env.R2_BUCKET_NAME}/${objectKey}?X-Amz-Expires=1800`;
+  const signed = await client.sign(new Request(url), { aws: { signQuery: true } });
+  return signed.url;
+}
+
+function enabledPlatforms(job: StoredJob): Platform[] {
+  return (Object.entries(job.platforms) as Array<[Platform, boolean]>)
+    .filter(([, enabled]) => enabled)
+    .map(([platform]) => platform);
 }
 
 async function verifyAssets(input: DraftRequest, bucket: R2Bucket): Promise<string | null> {
@@ -421,20 +876,6 @@ async function verifyAssets(input: DraftRequest, bucket: R2Bucket): Promise<stri
   return null;
 }
 
-async function putJobWithRetry(env: Env, job: StoredJob): Promise<void> {
-  let lastError: unknown;
-  for (let attempt = 0; attempt < 3; attempt += 1) {
-    try {
-      await env.METADATA.put(jobKey(job.id), JSON.stringify(job));
-      return;
-    } catch (error) {
-      lastError = error;
-      if (attempt < 2) await wait(1100);
-    }
-  }
-  throw lastError;
-}
-
 async function readJson(request: Request): Promise<unknown> {
   const contentType = request.headers.get("content-type") ?? "";
   if (!contentType.toLowerCase().includes("application/json")) return null;
@@ -445,16 +886,8 @@ async function readJson(request: Request): Promise<unknown> {
   }
 }
 
-function jobKey(jobId: string): string {
-  return `job:${jobId}`;
-}
-
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : "Unexpected server error.";
-}
-
-function wait(milliseconds: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
 function json(body: unknown, status = 200): Response {

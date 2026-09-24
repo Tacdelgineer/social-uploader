@@ -8,8 +8,17 @@ const input: DraftRequest = {
   description: "A caption",
   scheduledAt: "2026-10-01T19:30:00.000Z",
   timezone: "America/Los_Angeles",
+  videoDurationSeconds: 30,
   platforms: { youtube: true, instagram: false, tiktok: false },
   youtube: { visibility: "public", madeForKids: false },
+  instagram: { shareToFeed: true },
+  tiktok: {
+    privacy: "SELF_ONLY",
+    allowComments: false,
+    allowDuet: false,
+    allowStitch: false,
+    coverTimestampMs: 0,
+  },
   assets: {
     video: { key: "uploads/id/video.mp4", originalName: "short.mp4", contentType: "video/mp4", size: 123 },
     thumbnail: { key: "uploads/id/thumbnail.png", originalName: "cover.png", contentType: "image/png", size: 45 },

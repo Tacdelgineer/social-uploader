@@ -353,7 +353,8 @@ summary:focus-visible {
 
 .field input,
 .field textarea,
-.mini-field select {
+.mini-field select,
+.mini-field input[type="number"] {
   width: 100%;
   border: 1px solid #dce1da;
   border-radius: 12px;
@@ -379,7 +380,8 @@ summary:focus-visible {
 
 .field input:focus,
 .field textarea:focus,
-.mini-field select:focus {
+.mini-field select:focus,
+.mini-field input[type="number"]:focus {
   border-color: #9abf52;
   box-shadow: 0 0 0 3px rgba(188, 255, 57, 0.16);
 }
@@ -552,7 +554,8 @@ summary:focus-visible {
   line-height: 1.5;
 }
 
-.youtube-settings {
+.youtube-settings,
+.platform-settings-grid {
   display: grid;
   gap: 12px;
 }
@@ -571,7 +574,8 @@ summary:focus-visible {
   font-weight: 700;
 }
 
-.mini-field select {
+.mini-field select,
+.mini-field input[type="number"] {
   width: 100%;
   height: 38px;
   border: 1px solid #dce1da;
@@ -580,6 +584,40 @@ summary:focus-visible {
   color: #28312c;
   padding: 0 9px;
   font-size: 11px;
+}
+
+.mini-field input[type="number"] {
+  box-sizing: border-box;
+}
+
+.interaction-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.check-field {
+  display: flex;
+  gap: 7px;
+  align-items: center;
+  color: #59625c;
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.check-field input {
+  accent-color: #84b028;
+}
+
+.check-field input:disabled + span {
+  color: #a0a7a1;
+}
+
+.platform-settings .restriction-note {
+  border-radius: 8px;
+  background: #f4f0ff;
+  color: #644b85;
+  padding: 8px;
 }
 
 .platform-settings .settings-note {
@@ -697,9 +735,15 @@ summary:focus-visible {
   color: #855e00;
 }
 
-.state-scheduled {
+.state-scheduled,
+.state-completed {
   background: #e9f8d7;
   color: #416d16;
+}
+
+.state-partial {
+  background: #fff1c9;
+  color: #855e00;
 }
 
 .state-failed {
@@ -772,6 +816,11 @@ summary:focus-visible {
 
 .upload-result .result-warnings {
   color: #8a5f09;
+}
+
+#result-platforms {
+  display: grid;
+  gap: 3px;
 }
 
 .status-view {
