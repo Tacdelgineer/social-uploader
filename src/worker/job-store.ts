@@ -1,6 +1,8 @@
 import type { Platform, PlatformJobStatus, StoredJob } from "../shared/contracts";
 import type { Env } from "./env";
 
+export const FAILED_MEDIA_RETENTION_MS = 24 * 60 * 60 * 1000;
+
 export function jobKey(jobId: string): string {
   return `job:${jobId}`;
 }
@@ -45,11 +47,13 @@ export async function markPlatformFailed(
 ): Promise<StoredJob | null> {
   const job = await loadJob(env, jobId);
   if (!job || !job.platforms[platform]) return job;
+  const now = new Date();
   const updated = normalizeOverallStatus({
     ...job,
-    schemaVersion: 4,
-    updatedAt: new Date().toISOString(),
+    schemaVersion: 6,
+    updatedAt: now.toISOString(),
     lastError: error.slice(0, 500),
+    retryMediaExpiresAt: job.retryMediaExpiresAt ?? new Date(now.getTime() + FAILED_MEDIA_RETENTION_MS).toISOString(),
     platformStatus: { ...job.platformStatus, [platform]: "failed" },
     platformErrors: { ...job.platformErrors, [platform]: error.slice(0, 500) },
   });
@@ -64,7 +68,7 @@ export function setPlatformStatus(
 ): StoredJob {
   return normalizeOverallStatus({
     ...job,
-    schemaVersion: 4,
+    schemaVersion: 6,
     updatedAt: new Date().toISOString(),
     lastError: undefined,
     platformStatus: { ...job.platformStatus, [platform]: status },
@@ -102,10 +106,7 @@ export async function cleanupReleasedMedia(
   job: StoredJob,
 ): Promise<{ job: StoredJob; warning?: string }> {
   if (job.mediaDeleted) return { job };
-  const released = (Object.entries(job.platforms) as Array<[Platform, boolean]>).every(
-    ([platform, enabled]) => !enabled || sourceReleased(job, platform),
-  );
-  if (!released) return { job };
+  if (!shouldDeleteMedia(job)) return { job };
 
   try {
     await env.UPLOADS.delete([job.assets.video.key, job.assets.thumbnail.key]);
@@ -130,18 +131,35 @@ export async function cleanupReleasedMedia(
   }
 }
 
-function sourceReleased(job: StoredJob, platform: Platform): boolean {
-  if (["failed", "cancelled"].includes(job.platformStatus?.[platform] ?? "")) return true;
-  if (platform === "youtube") return Boolean(job.youtubeResult);
-  if (platform === "instagram") return job.instagramResult?.mediaTransferred === true;
-  return job.tiktokResult?.uploadCompleted === true;
+export function jobRequiresSource(job: StoredJob, now = new Date()): boolean {
+  if (job.mediaDeleted || job.status === "cancelled") return false;
+  if (hasFailedPlatform(job) || ["failed", "partial"].includes(job.status)) {
+    return retryMediaExpiresAt(job).getTime() > now.getTime();
+  }
+  return !allSelectedPlatformsSucceeded(job);
 }
 
-export function jobRequiresSource(job: StoredJob): boolean {
-  if (job.mediaDeleted || job.status === "cancelled") return false;
+export function retryMediaExpiresAt(job: StoredJob): Date {
+  if (job.retryMediaExpiresAt) return new Date(job.retryMediaExpiresAt);
+  return new Date(new Date(job.updatedAt).getTime() + FAILED_MEDIA_RETENTION_MS);
+}
+
+export function hasFailedPlatform(job: StoredJob): boolean {
   return (Object.entries(job.platforms) as Array<[Platform, boolean]>).some(
-    ([platform, enabled]) => enabled && !sourceReleased(job, platform),
+    ([platform, enabled]) => enabled && job.platformStatus?.[platform] === "failed",
   );
+}
+
+function allSelectedPlatformsSucceeded(job: StoredJob): boolean {
+  return (Object.entries(job.platforms) as Array<[Platform, boolean]>).every(
+    ([platform, enabled]) => !enabled || ["scheduled", "published"].includes(job.platformStatus?.[platform] ?? ""),
+  );
+}
+
+function shouldDeleteMedia(job: StoredJob, now = new Date()): boolean {
+  if (job.status === "cancelled" || allSelectedPlatformsSucceeded(job)) return true;
+  return (hasFailedPlatform(job) || ["failed", "partial"].includes(job.status)) &&
+    retryMediaExpiresAt(job).getTime() <= now.getTime();
 }
 
 function wait(milliseconds: number): Promise<void> {

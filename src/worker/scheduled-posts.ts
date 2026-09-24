@@ -15,13 +15,17 @@ import { recordAppEvent } from "./events";
 import { getInstagramCredentials } from "./instagram-oauth";
 import {
   cleanupReleasedMedia,
+  hasFailedPlatform,
+  jobRequiresSource,
   listAllJobs,
   loadJob,
   normalizeOverallStatus,
   putJobWithRetry,
+  retryMediaExpiresAt,
 } from "./job-store";
 import { getYouTubeAccessToken } from "./oauth";
 import { getTikTokCredentials } from "./tiktok-oauth";
+import { queryTikTokCreatorInfo } from "./tiktok";
 import { validateDraftRequest } from "./validation";
 import {
   deleteYouTubeVideo,
@@ -34,13 +38,13 @@ import {
 export async function listScheduledPosts(env: Env, now = new Date()): Promise<ScheduledPostSummary[]> {
   const jobs = await listAllJobs(env);
   return jobs
-    .filter((job) => isEditableScheduledJob(job, now))
-    .sort((left, right) => (left.scheduledAt ?? "").localeCompare(right.scheduledAt ?? ""))
-    .map((job) => summarize(job));
+    .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))
+    .map((job) => summarize(job, now));
 }
 
 export async function getScheduledThumbnail(env: Env, jobId: string): Promise<Response> {
-  const job = await requireScheduledJob(env, jobId);
+  const job = await loadJob(env, jobId);
+  if (!job) return new Response("Post not found.", { status: 404 });
   const thumbnail = await env.UPLOADS.get(job.assets.thumbnail.key);
   if (!thumbnail) return new Response("Thumbnail not found.", { status: 404 });
   const headers = new Headers();
@@ -97,7 +101,7 @@ export async function replaceScheduledThumbnail(
     }
     let updated: StoredJob = {
       ...job,
-      schemaVersion: 5,
+      schemaVersion: 6,
       mediaDeleted: false,
       assets: {
         ...job.assets,
@@ -159,7 +163,13 @@ export async function editScheduledPost(
     throw new Error("The source video was already released, so another platform cannot be added to this post.");
   }
   if (candidate.platforms.instagram) await getInstagramCredentials(env);
-  if (candidate.platforms.tiktok) await getTikTokCredentials(env);
+  if (candidate.platforms.tiktok) {
+    const { accessToken } = await getTikTokCredentials(env);
+    const creator = await queryTikTokCreatorInfo(accessToken);
+    if (!creator.isPrivateAccount) {
+      throw new Error("TikTok requires this account to be Private while the app is unaudited.");
+    }
+  }
   const youtubeToken = candidate.platforms.youtube || job.platforms.youtube
     ? await getYouTubeAccessToken(env)
     : undefined;
@@ -208,7 +218,7 @@ export async function editScheduledPost(
   let updated = normalizeOverallStatus({
     ...job,
     ...candidate,
-    schemaVersion: 5,
+    schemaVersion: 6,
     title: candidate.title.trim(),
     updatedAt: new Date().toISOString(),
     lastError: undefined,
@@ -230,6 +240,66 @@ export async function editScheduledPost(
   return summarize(updated);
 }
 
+export async function retryFailedPlatform(
+  env: Env,
+  jobId: string,
+  platform: "instagram" | "tiktok",
+  now = new Date(),
+): Promise<ScheduledPostSummary> {
+  const job = await loadJob(env, jobId);
+  if (!job) throw new Error("Post not found.");
+  if (!job.platforms[platform] || job.platformStatus?.[platform] !== "failed") {
+    throw new Error(`${platform === "tiktok" ? "TikTok" : "Instagram"} is not a failed step on this post.`);
+  }
+
+  const expiresAt = retryMediaExpiresAt(job);
+  if (job.mediaDeleted || expiresAt.getTime() <= now.getTime()) {
+    await expireRetryMedia(env, job, now);
+    throw new Error("Source expired — upload again");
+  }
+  const [video, thumbnail] = await Promise.all([
+    env.UPLOADS.head(job.assets.video.key),
+    env.UPLOADS.head(job.assets.thumbnail.key),
+  ]);
+  if (!video || !thumbnail) {
+    await expireRetryMedia(env, job, now);
+    throw new Error("Source expired — upload again");
+  }
+
+  if (platform === "tiktok") {
+    const { accessToken } = await getTikTokCredentials(env);
+    const creator = await queryTikTokCreatorInfo(accessToken);
+    if (!creator.isPrivateAccount) {
+      throw new Error("TikTok requires this account to be Private while the app is unaudited.");
+    }
+  } else {
+    await getInstagramCredentials(env);
+  }
+
+  const updated = normalizeOverallStatus({
+    ...job,
+    schemaVersion: 6,
+    updatedAt: now.toISOString(),
+    lastError: remainingPlatformError(job, platform),
+    retryMediaExpiresAt: expiresAt.toISOString(),
+    retryRequestedAt: { ...job.retryRequestedAt, [platform]: now.toISOString() },
+    schedulerAttempts: { ...job.schedulerAttempts, [platform]: 0 },
+    platformStatus: { ...job.platformStatus, [platform]: "pending" },
+    platformErrors: { ...job.platformErrors, [platform]: undefined },
+    instagramResult: platform === "instagram" ? undefined : job.instagramResult,
+    tiktokResult: platform === "tiktok" ? undefined : job.tiktokResult,
+  });
+  await putJobWithRetry(env, updated);
+  await recordAppEvent(env, {
+    level: "info",
+    category: platform,
+    platform,
+    jobId,
+    message: `${platform === "tiktok" ? "TikTok" : "Instagram"} retry queued; successful platforms were left unchanged.`,
+  });
+  return summarize(updated, now);
+}
+
 export async function cancelScheduledPost(env: Env, jobId: string, now = new Date()): Promise<void> {
   const job = await requireScheduledJob(env, jobId, now);
   if (job.youtubeResult) {
@@ -241,7 +311,7 @@ export async function cancelScheduledPost(env: Env, jobId: string, now = new Dat
   ) as StoredJob["platformStatus"];
   const cancelled: StoredJob = {
     ...job,
-    schemaVersion: 5,
+    schemaVersion: 6,
     status: "cancelled",
     platformStatus,
     cancelledAt: now.toISOString(),
@@ -274,25 +344,53 @@ function isEditableScheduledJob(job: StoredJob, now: Date): boolean {
   return selected(job).some((platform) => (job.platformStatus?.[platform] ?? "pending") === "scheduled" || (job.platformStatus?.[platform] ?? "pending") === "pending");
 }
 
-function summarize(job: StoredJob): ScheduledPostSummary {
+function summarize(job: StoredJob, now = new Date()): ScheduledPostSummary {
+  const sourceMediaAvailable = jobRequiresSource(job, now);
+  const canEdit = isEditableScheduledJob(job, now);
   return {
     id: job.id,
     title: job.title,
     description: job.description,
-    scheduledAt: job.scheduledAt!,
+    status: job.status,
+    createdAt: job.createdAt,
+    updatedAt: job.updatedAt,
+    scheduledAt: job.scheduledAt,
     timezone: job.timezone,
     platforms: job.platforms,
     platformStatus: job.platformStatus ?? {},
+    platformErrors: job.platformErrors ?? {},
     fileSizeBytes: job.assets.video.size,
-    thumbnailUrl: job.mediaDeleted && job.youtubeResult
+    thumbnailUrl: !sourceMediaAvailable && job.youtubeResult
       ? `https://i.ytimg.com/vi/${encodeURIComponent(job.youtubeResult.videoId)}/mqdefault.jpg`
-      : `/api/scheduled-posts/${encodeURIComponent(job.id)}/thumbnail`,
+      : sourceMediaAvailable
+        ? `/api/scheduled-posts/${encodeURIComponent(job.id)}/thumbnail`
+        : "",
     youtube: job.youtube,
     instagram: job.instagram,
     tiktok: job.tiktok,
-    canEdit: true,
-    sourceMediaAvailable: !job.mediaDeleted,
+    canEdit,
+    canCancel: canEdit,
+    sourceMediaAvailable,
+    mediaExpiresAt: hasFailedPlatform(job) ? retryMediaExpiresAt(job).toISOString() : undefined,
   };
+}
+
+async function expireRetryMedia(env: Env, job: StoredJob, now: Date): Promise<void> {
+  await env.UPLOADS.delete([job.assets.video.key, job.assets.thumbnail.key]);
+  await putJobWithRetry(env, {
+    ...job,
+    schemaVersion: 6,
+    mediaDeleted: true,
+    retryMediaExpiresAt: job.retryMediaExpiresAt ?? retryMediaExpiresAt(job).toISOString(),
+    updatedAt: now.toISOString(),
+  });
+}
+
+function remainingPlatformError(job: StoredJob, retried: Platform): string | undefined {
+  return selected(job)
+    .filter((platform) => platform !== retried && job.platformStatus?.[platform] === "failed")
+    .map((platform) => job.platformErrors?.[platform])
+    .find((message): message is string => Boolean(message));
 }
 
 function selected(job: Pick<StoredJob, "platforms">): Platform[] {

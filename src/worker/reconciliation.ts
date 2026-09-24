@@ -1,7 +1,7 @@
 import type { Platform, StoredJob } from "../shared/contracts";
 import type { Env } from "./env";
 import { recordAppEvent } from "./events";
-import { jobRequiresSource, listAllJobs, putJobWithRetry } from "./job-store";
+import { hasFailedPlatform, jobRequiresSource, listAllJobs, putJobWithRetry } from "./job-store";
 
 const ABANDONED_AFTER_MS = 7 * 24 * 60 * 60 * 1000;
 const ACTIVE_UPLOAD_GRACE_MS = 2 * 60 * 60 * 1000;
@@ -33,9 +33,10 @@ export async function getStorageBreakdown(
     orphanStagingBytes: 0,
     orphanStagingObjectCount: 0,
   };
+  const now = new Date();
   for (const object of objects) {
     const job = jobForObject(object, jobsById);
-    if (job && isPendingScheduledMedia(job, object.key)) {
+    if (job && isRetainedJobMedia(job, object.key, now)) {
       breakdown.pendingMediaBytes += object.size;
       breakdown.pendingMediaObjectCount += 1;
     } else {
@@ -66,10 +67,11 @@ export async function reconcileStorage(env: Env, now = new Date()): Promise<{ de
       deleteKeys.push(object.key);
       continue;
     }
-    if (!jobRequiresSource(job)) {
+    if (!jobRequiresSource(job, now)) {
       deleteKeys.push(object.key);
       continue;
     }
+    if (hasFailedPlatform(job) || ["failed", "partial"].includes(job.status)) continue;
     const activeScheduled = hasPendingScheduledTransfer(job);
     const recentlyActive = now.getTime() - new Date(job.updatedAt).getTime() < ACTIVE_UPLOAD_GRACE_MS;
     if (!activeScheduled && !recentlyActive) {
@@ -82,7 +84,7 @@ export async function reconcileStorage(env: Env, now = new Date()): Promise<{ de
 
   for (const job of jobs) {
     if (job.mediaDeleted) continue;
-    if (!jobRequiresSource(job) || deleteKeys.includes(job.assets.video.key) || deleteKeys.includes(job.assets.thumbnail.key)) {
+    if (!jobRequiresSource(job, now) || deleteKeys.includes(job.assets.video.key) || deleteKeys.includes(job.assets.thumbnail.key)) {
       const [video, thumbnail] = await Promise.all([
         env.UPLOADS.head(job.assets.video.key),
         env.UPLOADS.head(job.assets.thumbnail.key),
@@ -114,13 +116,14 @@ export async function reconcileStorage(env: Env, now = new Date()): Promise<{ de
   return { deletedObjects: deleteKeys.length };
 }
 
-function isPendingScheduledMedia(job: StoredJob, key: string): boolean {
-  if (!hasPendingScheduledTransfer(job)) return false;
+function isRetainedJobMedia(job: StoredJob, key: string, now: Date): boolean {
+  if (!jobRequiresSource(job, now)) return false;
   return key === job.assets.video.key || key === job.assets.thumbnail.key;
 }
 
 function hasPendingScheduledTransfer(job: StoredJob): boolean {
-  if (!job.scheduledAt || isTerminal(job) || !jobRequiresSource(job)) return false;
+  if (isTerminal(job) || !jobRequiresSource(job)) return false;
+  if (!job.scheduledAt && !Object.values(job.retryRequestedAt ?? {}).some(Boolean)) return false;
   return (["instagram", "tiktok"] as Platform[]).some(
     (platform) => job.platforms[platform] && !["failed", "cancelled", "published"].includes(job.platformStatus?.[platform] ?? "pending"),
   );

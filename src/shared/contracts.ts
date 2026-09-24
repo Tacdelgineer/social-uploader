@@ -100,7 +100,7 @@ export interface DraftRequest {
 }
 
 export interface StoredJob extends DraftRequest {
-  schemaVersion: 2 | 3 | 4 | 5;
+  schemaVersion: 2 | 3 | 4 | 5 | 6;
   status: JobStatus;
   createdAt: string;
   updatedAt: string;
@@ -140,6 +140,8 @@ export interface StoredJob extends DraftRequest {
     totalChunkCount?: number;
   };
   schedulerAttempts?: Partial<Record<Platform, number>>;
+  retryRequestedAt?: Partial<Record<Platform, string>>;
+  retryMediaExpiresAt?: string;
   lastSchedulerAttemptAt?: string;
   cancelledAt?: string;
 }
@@ -157,17 +159,23 @@ export interface ScheduledPostSummary {
   id: string;
   title: string;
   description: string;
-  scheduledAt: string;
+  status: JobStatus;
+  createdAt: string;
+  updatedAt: string;
+  scheduledAt: string | null;
   timezone: string;
   platforms: Record<Platform, boolean>;
   platformStatus: Partial<Record<Platform, PlatformJobStatus>>;
+  platformErrors: Partial<Record<Platform, string>>;
   fileSizeBytes: number;
   thumbnailUrl: string;
   youtube: YouTubeSettings;
   instagram: InstagramSettings;
   tiktok: TikTokSettings;
   canEdit: boolean;
+  canCancel: boolean;
   sourceMediaAvailable: boolean;
+  mediaExpiresAt?: string;
 }
 
 export interface ScheduledPostsResponse {
@@ -222,6 +230,7 @@ export interface TikTokCreatorInfo {
   duetDisabled: boolean;
   stitchDisabled: boolean;
   maxVideoDurationSeconds: number;
+  isPrivateAccount: boolean;
 }
 
 export interface TikTokStartResponse {
@@ -261,6 +270,7 @@ export interface AppEvent {
 
 export interface SystemJobSummary {
   id: string;
+  title: string;
   platform: Platform;
   platforms?: Platform[];
   status: "uploading" | "processing" | "scheduled" | "completed" | "partial" | "failed" | "cancelled";
@@ -288,6 +298,7 @@ export interface SystemStatusResponse {
   connections: Record<Platform, boolean>;
   scheduling: {
     pendingCount: number;
+    failedCount: number;
     nextPublishAt: string | null;
     pendingMediaBytes: number;
     pendingMediaObjectCount: number;

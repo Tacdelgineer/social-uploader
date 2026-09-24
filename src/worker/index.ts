@@ -40,6 +40,7 @@ import {
 } from "./instagram";
 import {
   cleanupReleasedMedia,
+  FAILED_MEDIA_RETENTION_MS,
   jobKey,
   loadJob,
   markPlatformFailed,
@@ -61,6 +62,7 @@ import {
   getScheduledThumbnail,
   listScheduledPosts,
   replaceScheduledThumbnail,
+  retryFailedPlatform,
 } from "./scheduled-posts";
 import { runScheduler } from "./scheduler";
 import {
@@ -211,6 +213,20 @@ async function route(request: Request, env: Env): Promise<Response> {
     return replaceScheduledJobThumbnail(request, env, thumbnailReplaceMatch[1] ?? "");
   }
 
+  const retryMatch = /^\/api\/jobs\/([^/]+)\/retry\/(instagram|tiktok)$/u.exec(url.pathname);
+  if (retryMatch && request.method === "POST") {
+    if (!UUID_PATTERN.test(retryMatch[1] ?? "")) return json({ error: "Invalid job ID." } satisfies ApiError, 400);
+    try {
+      return json(await retryFailedPlatform(
+        env,
+        retryMatch[1]!,
+        retryMatch[2] as "instagram" | "tiktok",
+      ));
+    } catch (error) {
+      return json({ error: errorMessage(error) } satisfies ApiError, 409);
+    }
+  }
+
   const completionMatch = /^\/api\/jobs\/([^/]+)\/youtube\/complete$/u.exec(url.pathname);
   if (completionMatch && request.method === "POST") {
     return completeYouTubeUpload(request, env, completionMatch[1] ?? "");
@@ -350,7 +366,16 @@ async function createJob(request: Request, env: Env): Promise<Response> {
 
   const accessToken = input.platforms.youtube ? await getYouTubeAccessToken(env) : undefined;
   if (input.platforms.instagram) await getInstagramCredentials(env);
-  if (input.platforms.tiktok) await getTikTokCredentials(env);
+  if (input.platforms.tiktok) {
+    const { accessToken: tiktokAccessToken } = await getTikTokCredentials(env);
+    const creator = await queryTikTokCreatorInfo(tiktokAccessToken);
+    if (!creator.isPrivateAccount) {
+      return json(
+        { error: "TikTok requires this account to be Private while the app is unaudited." } satisfies ApiError,
+        409,
+      );
+    }
+  }
   const uploadUrl = accessToken ? await startYouTubeUpload(input, accessToken) : undefined;
   const now = new Date().toISOString();
   const platformStatus = Object.fromEntries(
@@ -361,7 +386,7 @@ async function createJob(request: Request, env: Env): Promise<Response> {
   const job: StoredJob = normalizeOverallStatus({
     ...input,
     title: input.title.trim(),
-    schemaVersion: 5,
+    schemaVersion: 6,
     status: "uploading",
     platformStatus,
     createdAt: now,
@@ -448,18 +473,35 @@ async function updateJobState(request: Request, env: Env, jobId: string): Promis
   }
 
   const status = body.status as JobStateUpdateRequest["status"];
-  const updated: StoredJob = {
+  const now = new Date();
+  const platformStatus = Object.fromEntries(
+    enabledPlatforms(job).map((platform) => {
+      const current = job.platformStatus?.[platform] ?? "pending";
+      if (status === "cancelled") return [platform, "cancelled"];
+      return [platform, ["scheduled", "published"].includes(current) ? current : "failed"];
+    }),
+  ) as StoredJob["platformStatus"];
+  let updated: StoredJob = {
     ...job,
+    schemaVersion: 6,
     status,
-    updatedAt: new Date().toISOString(),
+    platformStatus,
+    retryMediaExpiresAt: status === "failed"
+      ? job.retryMediaExpiresAt ?? new Date(now.getTime() + FAILED_MEDIA_RETENTION_MS).toISOString()
+      : job.retryMediaExpiresAt,
+    updatedAt: now.toISOString(),
     lastError: body.error?.slice(0, 500),
   };
   await putJobWithRetry(env, updated);
+  const cleanup = status === "cancelled" ? await cleanupReleasedMedia(env, updated) : undefined;
+  if (cleanup) updated = cleanup.job;
   await recordAppEvent(env, {
     level: status === "failed" ? "error" : "warning",
     category: "upload",
     jobId,
-    message: status === "failed" ? updated.lastError ?? "Upload failed." : "Upload cancelled by user.",
+    message: status === "failed"
+      ? updated.lastError ?? "Upload failed."
+      : `Upload cancelled by user; temporary media removed.${cleanup?.warning ? ` ${cleanup.warning}` : ""}`,
   });
   return json(updated);
 }
@@ -682,9 +724,6 @@ async function checkInstagramPublish(env: Env, jobId: string): Promise<Response>
       },
     };
     await putJobWithRetry(env, job);
-    const cleanup = await cleanupReleasedMedia(env, job);
-    job = cleanup.job;
-
     const mediaId = await publishInstagramReel(
       credentials.userId,
       job.instagramResult!.containerId,
@@ -694,7 +733,6 @@ async function checkInstagramPublish(env: Env, jobId: string): Promise<Response>
       ...(job.instagramResult?.warnings ?? []),
       ...(await verifyInstagramReel(mediaId, credentials.accessToken)),
     ];
-    if (cleanup.warning) warnings.push(cleanup.warning);
     job = setPlatformStatus(
       {
         ...job,
@@ -710,6 +748,16 @@ async function checkInstagramPublish(env: Env, jobId: string): Promise<Response>
       "published",
     );
     await putJobWithRetry(env, job);
+    const cleanup = await cleanupReleasedMedia(env, job);
+    job = cleanup.job;
+    if (cleanup.warning) {
+      warnings.push(cleanup.warning);
+      job = {
+        ...job,
+        instagramResult: { ...job.instagramResult!, warnings },
+      };
+      await putJobWithRetry(env, job);
+    }
     await recordAppEvent(env, {
       level: warnings.length ? "warning" : "info",
       category: "instagram",

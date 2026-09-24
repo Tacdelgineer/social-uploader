@@ -20,10 +20,10 @@
         <div class="header-actions">
           <nav class="view-nav" aria-label="Dashboard sections">
             <button class="view-nav-button is-active" type="button" data-view-target="uploader-view">Uploader</button>
-            <button class="view-nav-button" type="button" data-view-target="scheduled-view">Scheduled posts</button>
+            <button class="view-nav-button" type="button" data-view-target="scheduled-view">Posts</button>
             <button class="view-nav-button" type="button" data-view-target="status-view">System status</button>
           </nav>
-          <span class="milestone-pill">Scheduling - M4</span>
+          <span class="milestone-pill">Delivery history - M5</span>
         </div>
       </header>
 
@@ -243,7 +243,7 @@
                       <input id="tiktok-direct-post-consent" type="checkbox" />
                       <span>I consent to Social Uploader sending this video and caption directly to TikTok.</span>
                     </label>
-                    <p class="settings-note restriction-note">Direct Post uses FILE_UPLOAD and is forced to SELF_ONLY. While this app is unaudited, the connected TikTok account must also be set to Private.</p>
+                    <p class="settings-note restriction-note">Testing mode: TikTok account must be Private and posts are SELF_ONLY.</p>
                   </div>
                 </details>
               </div>
@@ -271,7 +271,7 @@
                 <span>Upload &amp; publish</span>
                 <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14m-5-5 5 5-5 5" /></svg>
               </button>
-              <p class="submit-note">8 GB hard R2 cap - deleted after all selected transfers release it - 7-day fallback.</p>
+              <p class="submit-note">8 GB hard R2 cap - success deletes immediately - failures retain source for up to 24 hours.</p>
             </section>
           </aside>
         </form>
@@ -280,17 +280,23 @@
       <main id="scheduled-view" class="status-view" data-view hidden>
         <section class="status-hero">
           <div>
-            <p class="eyebrow">Before publication</p>
-            <h1>Scheduled posts</h1>
-            <p>Edit pending metadata, time, destinations, supported settings, and covers—or cancel the post.</p>
+            <p class="eyebrow">Delivery history</p>
+            <h1>Posts</h1>
+            <p>Track upcoming, failed, published, and cancelled deliveries in one place.</p>
           </div>
           <div class="status-refresh-wrap">
             <button id="scheduled-refresh" class="connect-button" type="button">Refresh</button>
-            <small>Instagram and TikTok are dispatched by the Worker at publish time.</small>
+            <small>Failed media remains available for retry for up to 24 hours.</small>
           </div>
         </section>
+        <nav class="post-tabs" aria-label="Post history filters">
+          <button class="post-tab is-active" type="button" data-post-filter="upcoming">Upcoming</button>
+          <button class="post-tab" type="button" data-post-filter="failed">Failed / Needs attention</button>
+          <button class="post-tab" type="button" data-post-filter="published">Published</button>
+          <button class="post-tab" type="button" data-post-filter="cancelled">Cancelled</button>
+        </nav>
         <section id="scheduled-posts-list" class="scheduled-posts-list" aria-live="polite">
-          <article class="panel empty-scheduled">Load scheduled posts to view pending work.</article>
+          <article class="panel empty-scheduled">Load posts to view delivery history.</article>
         </section>
       </main>
 
@@ -299,7 +305,7 @@
           <div>
             <p class="eyebrow">Existing infrastructure only</p>
             <h1>System status</h1>
-            <p>Live temporary storage, connection state, upload jobs, and the latest app events.</p>
+            <p>Storage, scheduler health, connections, and recent operational exceptions.</p>
           </div>
           <div class="status-refresh-wrap">
             <button id="status-refresh" class="connect-button" type="button">Refresh</button>
@@ -307,7 +313,7 @@
           </div>
         </section>
 
-        <section class="status-card-grid" aria-label="System overview">
+        <section class="status-card-grid overview-card-grid" aria-label="System overview">
           <article class="panel status-card storage-card">
             <p class="step-label">Temporary R2</p>
             <div class="metric-row"><strong id="storage-used">—</strong><span id="storage-percent">—</span></div>
@@ -316,10 +322,28 @@
               <div><dt>Objects</dt><dd id="storage-count">—</dd></div>
               <div><dt>Oldest</dt><dd id="storage-oldest">—</dd></div>
             </dl>
-            <p class="card-note">8 GB hard application cap. Seven-day lifecycle cleanup remains the fallback.</p>
+            <p class="card-note">8 GB hard application cap.</p>
           </article>
 
-          <article class="panel status-card">
+          <article class="panel status-card compact-status-card">
+            <p class="step-label">Upcoming posts</p>
+            <div class="metric-row"><strong id="scheduled-count">—</strong><span>upcoming</span></div>
+            <p class="card-note">Next: <span id="next-scheduled-publish">—</span></p>
+          </article>
+
+          <article class="panel status-card compact-status-card attention-card">
+            <p class="step-label">Failed posts</p>
+            <div class="metric-row"><strong id="failed-posts-count">—</strong><span>need attention</span></div>
+            <button id="open-failed-posts" class="text-button" type="button">Open failed posts</button>
+          </article>
+
+          <article class="panel status-card compact-status-card">
+            <p class="step-label">Last scheduler run</p>
+            <strong id="last-scheduler-run">—</strong>
+            <p id="last-scheduler-summary" class="card-note">No run loaded.</p>
+          </article>
+
+          <article class="panel status-card connections-overview-card">
             <p class="step-label">Connections</p>
             <div class="connection-status-list">
               <div><span class="platform-icon youtube">YT</span><strong>YouTube</strong><span id="status-youtube" class="connection-pill">—</span></div>
@@ -327,35 +351,6 @@
               <div><span class="platform-icon tiktok">TT</span><strong>TikTok</strong><span id="status-tiktok" class="connection-pill">—</span></div>
             </div>
           </article>
-
-          <article class="panel status-card local-worker-card">
-            <p class="step-label">Scheduler</p>
-            <div class="metric-row"><strong id="scheduled-count">—</strong><span>pending</span></div>
-            <dl class="metric-details">
-              <div><dt>Next publish</dt><dd id="next-scheduled-publish">—</dd></div>
-              <div><dt>Pending media</dt><dd id="pending-media">—</dd></div>
-              <div><dt>Orphan / staging</dt><dd id="orphan-media">—</dd></div>
-            </dl>
-          </article>
-        </section>
-
-        <section class="status-card-grid" aria-label="Platform outcomes">
-          <article class="panel status-card"><p class="step-label">YouTube outcomes</p><strong id="youtube-results">—</strong></article>
-          <article class="panel status-card"><p class="step-label">Instagram outcomes</p><strong id="instagram-results">—</strong></article>
-          <article class="panel status-card"><p class="step-label">TikTok outcomes</p><strong id="tiktok-results">—</strong></article>
-        </section>
-
-        <section class="panel status-section">
-          <div class="section-heading compact">
-            <div><p class="step-label">Recent activity</p><h2>Upload jobs</h2></div>
-            <p class="section-hint">Latest 50 metadata records</p>
-          </div>
-          <div class="table-scroll">
-            <table class="jobs-table">
-              <thead><tr><th>Platform</th><th>Status</th><th>File size</th><th>Created</th><th>Scheduled</th><th>Temp media</th></tr></thead>
-              <tbody id="jobs-table-body"><tr><td colspan="6" class="empty-cell">Load status to view jobs.</td></tr></tbody>
-            </table>
-          </div>
         </section>
 
         <div class="status-log-grid">
@@ -364,12 +359,12 @@
             <ol id="scheduler-runs-list" class="event-list"><li class="empty-event">No scheduler runs loaded.</li></ol>
           </section>
           <section class="panel status-section">
-            <div class="section-heading compact"><div><p class="step-label">Attention</p><h2>Recent errors</h2></div></div>
+            <div class="section-heading compact"><div><p class="step-label">Attention</p><h2>Recent platform errors</h2></div></div>
             <ol id="errors-list" class="event-list"><li class="empty-event">No errors loaded.</li></ol>
           </section>
           <section class="panel status-section">
-            <div class="section-heading compact"><div><p class="step-label">Last 50</p><h2>App events</h2></div></div>
-            <ol id="events-list" class="event-list"><li class="empty-event">No events loaded.</li></ol>
+            <div class="section-heading compact"><div><p class="step-label">Storage</p><h2>Cleanup events</h2></div></div>
+            <ol id="cleanup-list" class="event-list"><li class="empty-event">No cleanup events loaded.</li></ol>
           </section>
         </div>
       </main>

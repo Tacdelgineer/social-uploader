@@ -35,6 +35,7 @@ import {
 import { prepareThumbnailForPlatforms } from "./thumbnail";
 
 type UploadState = "uploading" | "processing" | "scheduled" | "failed" | "cancelled";
+type PostFilter = "upcoming" | "failed" | "published" | "cancelled";
 
 const form = requiredElement<HTMLFormElement>("draft-form");
 const videoInput = requiredElement<HTMLInputElement>("video-input");
@@ -85,6 +86,8 @@ let currentPercent = 0;
 let activeJobId: string | null = null;
 let cancelRequested = false;
 let platformSelection: PlatformSelection = selectionFromToggleInputs();
+let postsCache: ScheduledPostSummary[] = [];
+let activePostFilter: PostFilter = "upcoming";
 const activeXhrs = new Set<XMLHttpRequest>();
 const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
 
@@ -155,10 +158,30 @@ requiredElement<HTMLButtonElement>("status-refresh").addEventListener("click", (
 requiredElement<HTMLButtonElement>("scheduled-refresh").addEventListener("click", () => {
   void refreshScheduledPosts();
 });
+document.querySelectorAll<HTMLButtonElement>("[data-post-filter]").forEach((button) => {
+  button.addEventListener("click", () => setPostFilter(button.dataset.postFilter as PostFilter));
+});
+requiredElement<HTMLButtonElement>("open-failed-posts").addEventListener("click", () => {
+  document.querySelector<HTMLButtonElement>('[data-view-target="scheduled-view"]')?.click();
+  setPostFilter("failed");
+});
 
 form.addEventListener("submit", async (event) => {
   event.preventDefault();
   if (!validateForm()) return;
+
+  const selected = selectedPlatforms();
+  if (selected.includes("tiktok")) {
+    await refreshTikTokCreatorInfo();
+    if (!tiktokCreatorInfo) {
+      showToast("TikTok creator settings could not be verified. Try again before submitting.", true);
+      return;
+    }
+    if (!tiktokCreatorInfo.isPrivateAccount) {
+      showToast("TikTok requires this account to be Private while the app is unaudited.", true);
+      return;
+    }
+  }
 
   setBusy(true);
   cancelRequested = false;
@@ -166,7 +189,6 @@ form.addEventListener("submit", async (event) => {
   currentPercent = 0;
   uploadResult.hidden = true;
   const jobId = crypto.randomUUID();
-  const selected = selectedPlatforms();
   const platformErrors: string[] = [];
 
   try {
@@ -425,6 +447,10 @@ function validateForm(): boolean {
     if (!tiktokCreatorInfo) {
       showToast("Wait for TikTok creator settings to load.", true);
       void refreshTikTokCreatorInfo();
+      return false;
+    }
+    if (!tiktokCreatorInfo.isPrivateAccount) {
+      showToast("TikTok requires this account to be Private while the app is unaudited.", true);
       return false;
     }
     if (videoDurationSeconds > tiktokCreatorInfo.maxVideoDurationSeconds) {
@@ -894,7 +920,7 @@ async function refreshTikTokCreatorInfo(): Promise<void> {
     const info = await apiRequest<TikTokCreatorInfo>("/api/tiktok/creator-info");
     tiktokCreatorInfo = info;
     requiredElement<HTMLElement>("tiktok-creator-info").textContent =
-      `${info.nickname} (@${info.username}) - up to ${info.maxVideoDurationSeconds}s.`;
+      `${info.nickname} (@${info.username}) · ${info.isPrivateAccount ? "Private account ready" : "Public account — posting blocked in testing mode"} · up to ${info.maxVideoDurationSeconds}s.`;
     configureTikTokInteraction("tiktok-comments", info.commentDisabled);
     configureTikTokInteraction("tiktok-duet", info.duetDisabled);
     configureTikTokInteraction("tiktok-stitch", info.stitchDisabled);
@@ -916,7 +942,11 @@ async function refreshScheduledPosts(): Promise<void> {
   refresh.textContent = "Refreshing...";
   try {
     const response = await apiRequest<ScheduledPostsResponse>("/api/scheduled-posts");
-    renderScheduledPosts(response.posts);
+    postsCache = response.posts;
+    if (tiktokConnected && postsCache.some((post) => post.platformStatus.tiktok === "failed")) {
+      await refreshTikTokCreatorInfo();
+    }
+    renderScheduledPosts();
   } catch (error) {
     showToast(errorMessage(error), true);
   } finally {
@@ -925,13 +955,29 @@ async function refreshScheduledPosts(): Promise<void> {
   }
 }
 
-function renderScheduledPosts(posts: ScheduledPostSummary[]): void {
+function setPostFilter(filter: PostFilter): void {
+  activePostFilter = filter;
+  document.querySelectorAll<HTMLButtonElement>("[data-post-filter]").forEach((button) => {
+    const selected = button.dataset.postFilter === filter;
+    button.classList.toggle("is-active", selected);
+    button.setAttribute("aria-pressed", String(selected));
+  });
+  renderScheduledPosts();
+}
+
+function renderScheduledPosts(): void {
   const list = requiredElement<HTMLElement>("scheduled-posts-list");
   list.replaceChildren();
+  const posts = postsCache.filter((post) => postCategory(post) === activePostFilter);
   if (posts.length === 0) {
     const empty = document.createElement("article");
     empty.className = "panel empty-scheduled";
-    empty.textContent = "No pending scheduled posts.";
+    empty.textContent = {
+      upcoming: "No upcoming posts.",
+      failed: "No posts need attention.",
+      published: "No published posts yet.",
+      cancelled: "No cancelled posts.",
+    }[activePostFilter];
     list.append(empty);
     return;
   }
@@ -940,12 +986,21 @@ function renderScheduledPosts(posts: ScheduledPostSummary[]): void {
 
 function createScheduledPostCard(post: ScheduledPostSummary): HTMLElement {
   const card = document.createElement("article");
-  card.className = "panel scheduled-card";
+  card.id = `post-${post.id}`;
+  card.className = `panel scheduled-card post-card-${postCategory(post)}`;
 
-  const image = document.createElement("img");
-  image.className = "scheduled-thumbnail";
-  image.src = post.thumbnailUrl;
-  image.alt = "";
+  const imageWrap = document.createElement("div");
+  imageWrap.className = "scheduled-thumbnail-wrap";
+  if (post.thumbnailUrl) {
+    const image = document.createElement("img");
+    image.className = "scheduled-thumbnail";
+    image.src = post.thumbnailUrl;
+    image.alt = "";
+    image.addEventListener("error", () => imageWrap.classList.add("thumbnail-unavailable"), { once: true });
+    imageWrap.append(image);
+  } else {
+    imageWrap.classList.add("thumbnail-unavailable");
+  }
 
   const content = document.createElement("div");
   content.className = "scheduled-card-content";
@@ -959,54 +1014,180 @@ function createScheduledPostCard(post: ScheduledPostSummary): HTMLElement {
   text.append(title, caption);
   const actions = document.createElement("div");
   actions.className = "connection-actions";
-  const edit = document.createElement("button");
-  edit.type = "button";
-  edit.className = "connect-button";
-  edit.textContent = "Edit";
-  const cancel = document.createElement("button");
-  cancel.type = "button";
-  cancel.className = "text-button destructive-button";
-  cancel.textContent = "Cancel / delete";
-  actions.append(edit, cancel);
+  let edit: HTMLButtonElement | undefined;
+  if (post.canEdit) {
+    edit = document.createElement("button");
+    edit.type = "button";
+    edit.className = "connect-button compact-action";
+    edit.textContent = "Edit";
+    actions.append(edit);
+  }
+  if (post.canCancel) {
+    const cancel = document.createElement("button");
+    cancel.type = "button";
+    cancel.className = "text-button destructive-button compact-action";
+    cancel.textContent = "Cancel";
+    cancel.addEventListener("click", async () => {
+      if (!window.confirm(`Cancel “${post.title}” and delete its pending media? This cannot be undone.`)) return;
+      cancel.disabled = true;
+      try {
+        await apiRequest(`/api/jobs/${encodeURIComponent(post.id)}`, { method: "DELETE" });
+        showToast("Post cancelled and temporary media removed.");
+        await Promise.all([refreshScheduledPosts(), refreshSystemStatus()]);
+      } catch (error) {
+        showToast(errorMessage(error), true);
+        cancel.disabled = false;
+      }
+    });
+    actions.append(cancel);
+  }
   heading.append(text, actions);
 
   const meta = document.createElement("div");
   meta.className = "scheduled-meta";
-  const platforms = selectedPlatformsFromSummary(post);
-  for (const platform of platforms) {
-    const badge = document.createElement("span");
-    badge.className = "job-state";
-    badge.textContent = `${capitalize(platform)} · ${humanizeStatus(post.platformStatus[platform] ?? "pending")}`;
-    meta.append(badge);
-  }
   const schedule = document.createElement("span");
-  schedule.textContent = formatDate(post.scheduledAt);
+  schedule.textContent = post.scheduledAt
+    ? `Scheduled ${formatDate(post.scheduledAt)}`
+    : `Created ${formatDate(post.createdAt)}`;
   const size = document.createElement("span");
   size.textContent = formatBytes(post.fileSizeBytes);
   meta.append(schedule, size);
 
-  const editForm = createScheduledEditForm(post);
-  editForm.hidden = true;
-  edit.addEventListener("click", () => {
-    editForm.hidden = !editForm.hidden;
-    edit.textContent = editForm.hidden ? "Edit" : "Close edit";
-  });
-  cancel.addEventListener("click", async () => {
-    if (!window.confirm(`Cancel “${post.title}” and delete its pending media? This cannot be undone.`)) return;
-    cancel.disabled = true;
+  const platformList = document.createElement("div");
+  platformList.className = "post-platform-statuses";
+  for (const platform of selectedPlatformsFromSummary(post)) {
+    platformList.append(createPlatformDeliveryRow(post, platform));
+  }
+
+  content.append(heading, meta, platformList);
+  if (postCategory(post) === "failed") {
+    const retention = document.createElement("p");
+    retention.className = `retention-note ${post.sourceMediaAvailable ? "" : "source-expired"}`;
+    retention.textContent = post.sourceMediaAvailable && post.mediaExpiresAt
+      ? `Source retained for retry until ${formatDate(post.mediaExpiresAt)}`
+      : "Source expired — upload again";
+    content.append(retention);
+  }
+  if (edit) {
+    const editForm = createScheduledEditForm(post);
+    editForm.hidden = true;
+    edit.addEventListener("click", () => {
+      editForm.hidden = !editForm.hidden;
+      edit!.textContent = editForm.hidden ? "Edit" : "Close edit";
+    });
+    content.append(editForm);
+  }
+  card.append(imageWrap, content);
+  return card;
+}
+
+function createPlatformDeliveryRow(post: ScheduledPostSummary, platform: Platform): HTMLElement {
+  const row = document.createElement("div");
+  row.className = "platform-delivery-row";
+  const icon = document.createElement("span");
+  icon.className = `platform-icon ${platform}`;
+  icon.textContent = platform === "youtube" ? "YT" : platform === "instagram" ? "IG" : "TT";
+  const copy = document.createElement("div");
+  const heading = document.createElement("div");
+  heading.className = "platform-delivery-heading";
+  const name = document.createElement("strong");
+  name.textContent = capitalize(platform);
+  const state = effectivePlatformState(post, platform);
+  const badge = document.createElement("span");
+  badge.className = `job-state delivery-${state}`;
+  badge.textContent = capitalize(state);
+  heading.append(name, badge);
+  copy.append(heading);
+  if (state === "failed") {
+    const error = document.createElement("p");
+    error.className = "platform-error-copy";
+    error.textContent = humanReadablePlatformError(platform, post.platformErrors[platform]);
+    error.title = post.platformErrors[platform] ?? "";
+    copy.append(error);
+  }
+  row.append(icon, copy);
+  const retry = retryActionFor(post, platform);
+  if (retry) row.append(retry);
+  return row;
+}
+
+function retryActionFor(post: ScheduledPostSummary, platform: Platform): HTMLElement | null {
+  if (post.platformStatus[platform] !== "failed" || !["instagram", "tiktok"].includes(platform)) return null;
+  if (!post.sourceMediaAvailable) return null;
+  const prerequisite = document.createElement("span");
+  prerequisite.className = "retry-prerequisite";
+  if (platform === "instagram" && !instagramConnected) {
+    prerequisite.textContent = "Reconnect Instagram to retry";
+    return prerequisite;
+  }
+  if (platform === "tiktok") {
+    if (!tiktokConnected) {
+      prerequisite.textContent = "Reconnect TikTok to retry";
+      return prerequisite;
+    }
+    if (!tiktokCreatorInfo?.isPrivateAccount) {
+      prerequisite.textContent = tiktokCreatorInfo
+        ? "TikTok requires this account to be Private while the app is unaudited."
+        : "Checking TikTok prerequisites…";
+      return prerequisite;
+    }
+  }
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "connect-button retry-button";
+  button.textContent = `Retry ${capitalize(platform)}`;
+  button.addEventListener("click", async () => {
+    button.disabled = true;
     try {
-      await apiRequest(`/api/jobs/${encodeURIComponent(post.id)}`, { method: "DELETE" });
-      showToast("Scheduled post cancelled and temporary media removed.");
+      await apiRequest(`/api/jobs/${encodeURIComponent(post.id)}/retry/${platform}`, {
+        method: "POST",
+        body: "{}",
+      });
+      showToast(`${capitalize(platform)} retry queued. Other platforms will not be reposted.`);
       await Promise.all([refreshScheduledPosts(), refreshSystemStatus()]);
     } catch (error) {
       showToast(errorMessage(error), true);
-      cancel.disabled = false;
+      button.disabled = false;
     }
   });
+  return button;
+}
 
-  content.append(heading, meta, editForm);
-  card.append(image, content);
-  return card;
+function postCategory(post: ScheduledPostSummary): PostFilter {
+  if (post.status === "cancelled") return "cancelled";
+  if (post.status === "failed" || post.status === "partial") return "failed";
+  if (selectedPlatformsFromSummary(post).some((platform) => post.platformStatus[platform] === "failed")) return "failed";
+  if (selectedPlatformsFromSummary(post).some((platform) =>
+    ["pending", "publishing"].includes(effectivePlatformState(post, platform)))) return "upcoming";
+  return "published";
+}
+
+function effectivePlatformState(
+  post: ScheduledPostSummary,
+  platform: Platform,
+): "pending" | "publishing" | "published" | "failed" | "cancelled" {
+  const state = post.platformStatus[platform] ?? "pending";
+  if (state === "failed" || state === "cancelled" || state === "published") return state;
+  if (state === "uploading" || state === "processing") return "publishing";
+  if (state === "scheduled") {
+    return post.scheduledAt && new Date(post.scheduledAt).getTime() > Date.now() ? "pending" : "published";
+  }
+  return "pending";
+}
+
+function humanReadablePlatformError(platform: Platform, error?: string): string {
+  if (!error) return `${capitalize(platform)} delivery failed.`;
+  if (error.includes("unaudited_client_can_only_post_to_private_accounts") || error.includes("must be switched to Private")) {
+    return "TikTok account must be Private while app is unaudited";
+  }
+  if (error.includes("scope_not_authorized") || error.includes("video.publish")) {
+    return "TikTok publishing permission is missing";
+  }
+  if (error.toLowerCase().includes("token") && error.toLowerCase().includes("expired")) {
+    return `${capitalize(platform)} connection expired`;
+  }
+  const firstSentence = error.split(/(?<=[.!?])\s/u)[0] ?? error;
+  return firstSentence.length > 150 ? `${firstSentence.slice(0, 147)}…` : firstSentence;
 }
 
 function createScheduledEditForm(post: ScheduledPostSummary): HTMLFormElement {
@@ -1019,7 +1200,7 @@ function createScheduledEditForm(post: ScheduledPostSummary): HTMLFormElement {
   description.maxLength = 2200;
   description.rows = 4;
   const descriptionField = fieldWithControl("Caption / description", description);
-  const schedule = editTextInput("Publish date and time", toLocalDateTime(post.scheduledAt));
+  const schedule = editTextInput("Publish date and time", toLocalDateTime(post.scheduledAt!));
   schedule.input.type = "datetime-local";
   schedule.input.required = true;
   schedule.input.min = scheduledAtInput.min;
@@ -1057,6 +1238,27 @@ function createScheduledEditForm(post: ScheduledPostSummary): HTMLFormElement {
     "I consent to Social Uploader sending this scheduled video and caption directly to TikTok",
     post.tiktok.consentConfirmed === true,
   );
+  const youtubeSettings = groupedSettings("YouTube settings", madeForKids.label);
+  const instagramSettings = groupedSettings("Instagram settings", shareToFeed.label);
+  const tiktokNote = document.createElement("p");
+  tiktokNote.className = "settings-note restriction-note";
+  tiktokNote.textContent = "Testing mode: TikTok account must be Private and posts are SELF_ONLY.";
+  const tiktokSettings = groupedSettings(
+    "TikTok settings",
+    comments.label,
+    duet.label,
+    stitch.label,
+    cover.field,
+    consent.label,
+    tiktokNote,
+  );
+  const syncSettingGroups = () => {
+    youtubeSettings.hidden = !platformInputs.youtube.checked;
+    instagramSettings.hidden = !platformInputs.instagram.checked;
+    tiktokSettings.hidden = !platformInputs.tiktok.checked;
+  };
+  for (const input of Object.values(platformInputs)) input.addEventListener("change", syncSettingGroups);
+  syncSettingGroups();
 
   const thumbnail = document.createElement("input");
   thumbnail.type = "file";
@@ -1077,13 +1279,9 @@ function createScheduledEditForm(post: ScheduledPostSummary): HTMLFormElement {
     descriptionField,
     schedule.field,
     platformGroup,
-    madeForKids.label,
-    shareToFeed.label,
-    comments.label,
-    duet.label,
-    stitch.label,
-    cover.field,
-    consent.label,
+    youtubeSettings,
+    instagramSettings,
+    tiktokSettings,
     thumbnailField,
     note,
     save,
@@ -1101,6 +1299,10 @@ function createScheduledEditForm(post: ScheduledPostSummary): HTMLFormElement {
     if (selected.includes("tiktok") && !consent.input.checked) {
       showToast("Confirm consent before scheduling a TikTok Direct Post.", true);
       consent.input.focus();
+      return;
+    }
+    if (selected.includes("tiktok") && !tiktokCreatorInfo?.isPrivateAccount) {
+      showToast("TikTok requires this account to be Private while the app is unaudited.", true);
       return;
     }
     save.disabled = true;
@@ -1186,6 +1388,15 @@ function checkboxControl(labelText: string, checked: boolean): { label: HTMLLabe
   return { label, input };
 }
 
+function groupedSettings(labelText: string, ...controls: HTMLElement[]): HTMLFieldSetElement {
+  const group = document.createElement("fieldset");
+  group.className = "platform-settings-group";
+  const legend = document.createElement("legend");
+  legend.textContent = labelText;
+  group.append(legend, ...controls);
+  return group;
+}
+
 function selectedPlatformsFromSummary(post: ScheduledPostSummary): Platform[] {
   return (Object.entries(post.platforms) as Array<[Platform, boolean]>)
     .filter(([, enabled]) => enabled)
@@ -1224,19 +1435,21 @@ function renderSystemStatus(status: SystemStatusResponse): void {
   requiredElement<HTMLElement>("next-scheduled-publish").textContent = status.scheduling.nextPublishAt
     ? formatDate(status.scheduling.nextPublishAt)
     : "None";
-  requiredElement<HTMLElement>("pending-media").textContent =
-    `${formatBytes(status.scheduling.pendingMediaBytes)} (${status.scheduling.pendingMediaObjectCount})`;
-  requiredElement<HTMLElement>("orphan-media").textContent =
-    `${formatBytes(status.scheduling.orphanStagingBytes)} (${status.scheduling.orphanStagingObjectCount})`;
-  for (const platform of ["youtube", "instagram", "tiktok"] as Platform[]) {
-    const result = status.platformResults[platform];
-    requiredElement<HTMLElement>(`${platform}-results`).textContent =
-      `${result.succeeded} succeeded · ${result.failed} failed · ${result.pending} pending`;
-  }
+  requiredElement<HTMLElement>("failed-posts-count").textContent = String(status.scheduling.failedCount);
+  const lastRun = status.scheduling.recentRuns[0];
+  requiredElement<HTMLElement>("last-scheduler-run").textContent = lastRun
+    ? formatDate(lastRun.finishedAt)
+    : "No runs yet";
+  requiredElement<HTMLElement>("last-scheduler-summary").textContent = lastRun
+    ? `${lastRun.processedPlatforms} steps · ${lastRun.succeeded} completed · ${lastRun.failed} errors`
+    : "No run loaded.";
   renderSchedulerRuns(status);
-  renderJobs(status);
-  renderEvents("errors-list", status.recentErrors, "No recent errors.");
-  renderEvents("events-list", status.events, "No app events yet.");
+  renderPlatformErrors(status);
+  renderEvents(
+    "cleanup-list",
+    status.events.filter((event) => event.category === "cleanup" || event.category === "storage"),
+    "No recent storage cleanup events.",
+  );
 }
 
 function renderSchedulerRuns(status: SystemStatusResponse): void {
@@ -1272,50 +1485,56 @@ function renderConnection(id: string, connected: boolean): void {
   element.classList.toggle("is-connected", connected);
 }
 
-function renderJobs(status: SystemStatusResponse): void {
-  const body = requiredElement<HTMLTableSectionElement>("jobs-table-body");
-  body.replaceChildren();
-  if (status.jobs.length === 0) {
-    const row = document.createElement("tr");
-    const cell = document.createElement("td");
-    cell.colSpan = 6;
-    cell.className = "empty-cell";
-    cell.textContent = "No upload jobs yet.";
-    row.append(cell);
-    body.append(row);
+function renderPlatformErrors(status: SystemStatusResponse): void {
+  const list = requiredElement<HTMLOListElement>("errors-list");
+  list.replaceChildren();
+  const errors = status.recentErrors.filter((event) => Boolean(event.platform));
+  if (errors.length === 0) {
+    const empty = document.createElement("li");
+    empty.className = "empty-event";
+    empty.textContent = "No recent platform errors.";
+    list.append(empty);
     return;
   }
-  for (const job of status.jobs) {
-    const row = document.createElement("tr");
-    const platform = document.createElement("td");
-    platform.textContent = (job.platforms ?? [job.platform]).map(capitalize).join(" + ");
-    const state = document.createElement("td");
-    const badge = document.createElement("span");
-    badge.className = `job-state state-${job.status}`;
-    badge.textContent = capitalize(job.status);
-    if (job.lastError) badge.title = job.lastError;
-    state.append(badge);
-    appendCells(
-      row,
-      platform,
-      state,
-      formatBytes(job.fileSizeBytes),
-      formatDate(job.createdAt),
-      job.scheduledAt ? formatDate(job.scheduledAt) : "—",
-      job.temporaryMediaDeleted ? "Deleted" : "Retained",
-    );
-    body.append(row);
-  }
-}
-
-function appendCells(row: HTMLTableRowElement, ...values: Array<string | HTMLTableCellElement>): void {
-  for (const value of values) {
-    if (value instanceof HTMLTableCellElement) row.append(value);
-    else {
-      const cell = document.createElement("td");
-      cell.textContent = value;
-      row.append(cell);
+  const titles = new Map(status.jobs.map((job) => [job.id, job.title]));
+  for (const event of errors) {
+    const platform = event.platform!;
+    const item = document.createElement("li");
+    item.className = "event-item event-error platform-error-event";
+    const icon = document.createElement("span");
+    icon.className = `platform-icon ${platform}`;
+    icon.textContent = platform === "youtube" ? "YT" : platform === "instagram" ? "IG" : "TT";
+    const body = document.createElement("div");
+    body.className = "platform-error-body";
+    const heading = document.createElement("div");
+    const label = document.createElement("strong");
+    label.textContent = humanReadablePlatformError(platform, event.message);
+    const time = document.createElement("time");
+    time.dateTime = event.timestamp;
+    time.textContent = formatDate(event.timestamp);
+    heading.append(label, time);
+    body.append(heading);
+    if (event.jobId) {
+      const related = document.createElement("button");
+      related.type = "button";
+      related.className = "text-button related-post-button";
+      related.textContent = `${titles.get(event.jobId) ?? "Related post"} · ${event.jobId}`;
+      related.addEventListener("click", () => {
+        document.querySelector<HTMLButtonElement>('[data-view-target="scheduled-view"]')?.click();
+        setPostFilter("failed");
+        window.setTimeout(() => document.getElementById(`post-${event.jobId}`)?.scrollIntoView({ block: "center" }), 250);
+      });
+      body.append(related);
     }
+    const technical = document.createElement("details");
+    const summary = document.createElement("summary");
+    summary.textContent = "Technical provider error";
+    const message = document.createElement("p");
+    message.textContent = event.message;
+    technical.append(summary, message);
+    body.append(technical);
+    item.append(icon, body);
+    list.append(item);
   }
 }
 

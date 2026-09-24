@@ -1,10 +1,15 @@
 import { describe, expect, it } from "vitest";
 import type { StoredJob } from "../shared/contracts";
-import { jobRequiresSource, normalizeOverallStatus } from "./job-store";
+import {
+  FAILED_MEDIA_RETENTION_MS,
+  jobRequiresSource,
+  normalizeOverallStatus,
+  retryMediaExpiresAt,
+} from "./job-store";
 
 const base: StoredJob = {
   id: "c7f654b1-ea1d-4bfb-9a06-4fb57280eb76",
-  schemaVersion: 5,
+  schemaVersion: 6,
   title: "Scheduled",
   description: "Caption",
   scheduledAt: "2099-10-01T19:30:00.000Z",
@@ -61,13 +66,23 @@ describe("scheduled job state", () => {
     expect(normalizeOverallStatus(released).status).toBe("scheduled");
   });
 
-  it("treats failed or cancelled destinations as released", () => {
+  it("retains a failed destination only until its fixed 24-hour retry deadline", () => {
+    const failedAt = new Date("2026-09-24T08:00:00.000Z");
     const failed: StoredJob = {
       ...base,
       platforms: { youtube: false, instagram: true, tiktok: false },
       platformStatus: { instagram: "failed" },
       status: "failed",
+      updatedAt: failedAt.toISOString(),
+      retryMediaExpiresAt: new Date(failedAt.getTime() + FAILED_MEDIA_RETENTION_MS).toISOString(),
     };
-    expect(jobRequiresSource(failed)).toBe(false);
+    const deadline = retryMediaExpiresAt(failed);
+    expect(deadline.toISOString()).toBe("2026-09-25T08:00:00.000Z");
+    expect(jobRequiresSource(failed, new Date(deadline.getTime() - 1))).toBe(true);
+    expect(jobRequiresSource(failed, deadline)).toBe(false);
+  });
+
+  it("does not retain cancelled media", () => {
+    expect(jobRequiresSource({ ...base, status: "cancelled" })).toBe(false);
   });
 });

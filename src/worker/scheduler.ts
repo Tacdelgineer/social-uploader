@@ -12,6 +12,7 @@ import {
 } from "./instagram";
 import {
   cleanupReleasedMedia,
+  FAILED_MEDIA_RETENTION_MS,
   listAllJobs,
   loadJob,
   normalizeOverallStatus,
@@ -110,7 +111,7 @@ async function processInstagramStep(env: Env, job: StoredJob): Promise<StoredJob
     );
     const created = setPlatformStatus({
       ...job,
-      schemaVersion: 5,
+      schemaVersion: 6,
       instagramResult: {
         containerId,
         statusCode: "IN_PROGRESS",
@@ -153,7 +154,7 @@ async function processInstagramStep(env: Env, job: StoredJob): Promise<StoredJob
     credentials.accessToken,
   );
   const warnings = await verifyInstagramReel(mediaId, credentials.accessToken);
-  const published = setPlatformStatus({
+  let published = setPlatformStatus({
     ...transferred,
     instagramResult: {
       ...transferred.instagramResult!,
@@ -165,12 +166,14 @@ async function processInstagramStep(env: Env, job: StoredJob): Promise<StoredJob
     schedulerAttempts: { ...transferred.schedulerAttempts, instagram: 0 },
   }, "instagram", "published");
   await putJobWithRetry(env, published);
+  const cleanup = await cleanupReleasedMedia(env, published);
+  published = cleanup.job;
   await recordAppEvent(env, {
-    level: warnings.length ? "warning" : "info",
+    level: warnings.length || cleanup.warning ? "warning" : "info",
     category: "instagram",
     platform: "instagram",
     jobId: job.id,
-    message: `Scheduler published Instagram Reel ${mediaId}.`,
+    message: `Scheduler published Instagram Reel ${mediaId}.${cleanup.warning ? ` ${cleanup.warning}` : ""}`,
   });
   return published;
 }
@@ -187,7 +190,7 @@ async function processTikTokStep(env: Env, job: StoredJob): Promise<StoredJob> {
     );
     current = setPlatformStatus({
       ...current,
-      schemaVersion: 5,
+      schemaVersion: 6,
       tiktokResult: {
         publishId: initialized.publishId,
         status: "PROCESSING_UPLOAD",
@@ -300,12 +303,16 @@ async function recordScheduledFailure(
   const message = error instanceof Error ? error.message : "Unexpected scheduler error.";
   const attempts = (base.schedulerAttempts?.[platform] ?? 0) + 1;
   const terminal = attempts >= MAX_ATTEMPTS;
+  const now = new Date();
   const updated = normalizeOverallStatus({
     ...base,
-    schemaVersion: 5,
-    updatedAt: new Date().toISOString(),
-    lastSchedulerAttemptAt: new Date().toISOString(),
+    schemaVersion: 6,
+    updatedAt: now.toISOString(),
+    lastSchedulerAttemptAt: now.toISOString(),
     lastError: message.slice(0, 500),
+    retryMediaExpiresAt: terminal
+      ? base.retryMediaExpiresAt ?? new Date(now.getTime() + FAILED_MEDIA_RETENTION_MS).toISOString()
+      : base.retryMediaExpiresAt,
     schedulerAttempts: { ...base.schedulerAttempts, [platform]: attempts },
     platformStatus: {
       ...base.platformStatus,
@@ -340,8 +347,12 @@ async function signTemporaryDownload(env: Env, objectKey: string): Promise<strin
 }
 
 function isDue(job: StoredJob, scheduledTime: number): boolean {
-  if (!job.scheduledAt || new Date(job.scheduledAt).getTime() > scheduledTime) return false;
   if (["cancelled", "completed", "failed"].includes(job.status)) return false;
+  const scheduledDue = Boolean(job.scheduledAt) && new Date(job.scheduledAt!).getTime() <= scheduledTime;
+  const retryDue = Object.values(job.retryRequestedAt ?? {}).some(
+    (value) => Boolean(value) && new Date(value!).getTime() <= scheduledTime,
+  );
+  if (!scheduledDue && !retryDue) return false;
   return (["instagram", "tiktok"] as Platform[]).some(
     (platform) => job.platforms[platform] && ["pending", "uploading", "processing"].includes(job.platformStatus?.[platform] ?? "pending"),
   );

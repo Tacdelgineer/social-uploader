@@ -39,6 +39,9 @@ export async function getSystemStatus(env: Env): Promise<SystemStatusResponse> {
     },
     scheduling: {
       pendingCount: pending.length,
+      failedCount: allJobs.filter((job) =>
+        Object.values(job.platformStatus ?? {}).some((status) => status === "failed")
+      ).length,
       nextPublishAt: pending.map((job) => job.scheduledAt!).sort()[0] ?? null,
       ...breakdown,
       recentRuns,
@@ -61,6 +64,7 @@ function summarizeJob(job: StoredJob): SystemJobSummary {
   const platform = platforms[0] ?? "youtube";
   return {
     id: job.id,
+    title: job.title,
     platform,
     platforms,
     status: normalizeStatus(job.status),

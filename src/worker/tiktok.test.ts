@@ -1,6 +1,11 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { DraftRequest, TikTokCreatorInfo } from "../shared/contracts";
-import { calculateTikTokChunks, initializeTikTokDirectPost, validateCreatorSettings } from "./tiktok";
+import {
+  calculateTikTokChunks,
+  initializeTikTokDirectPost,
+  isTikTokPrivateAccount,
+  validateCreatorSettings,
+} from "./tiktok";
 
 const mebibyte = 1024 * 1024;
 
@@ -31,11 +36,12 @@ const draft: DraftRequest = {
 const creator: TikTokCreatorInfo = {
   username: "creator",
   nickname: "Creator",
-  privacyLevelOptions: ["SELF_ONLY"],
+  privacyLevelOptions: ["FOLLOWER_OF_CREATOR", "MUTUAL_FOLLOW_FRIENDS", "SELF_ONLY"],
   commentDisabled: false,
   duetDisabled: false,
   stitchDisabled: false,
   maxVideoDurationSeconds: 180,
+  isPrivateAccount: true,
 };
 
 describe("TikTok Direct Post", () => {
@@ -52,9 +58,15 @@ describe("TikTok Direct Post", () => {
     expect(() => validateCreatorSettings(draft, creator)).not.toThrow();
   });
 
+  it("distinguishes public and private accounts from creator privacy options", () => {
+    expect(isTikTokPrivateAccount(["PUBLIC_TO_EVERYONE", "MUTUAL_FOLLOW_FRIENDS", "SELF_ONLY"])).toBe(false);
+    expect(isTikTokPrivateAccount(["FOLLOWER_OF_CREATOR", "MUTUAL_FOLLOW_FRIENDS", "SELF_ONLY"])).toBe(true);
+  });
+
   it("rejects unavailable privacy, interactions, duration, or cover timestamps", () => {
     expect(() => validateCreatorSettings({ ...draft, tiktok: { ...draft.tiktok, consentConfirmed: false } }, creator)).toThrow("consent");
     expect(() => validateCreatorSettings(draft, { ...creator, privacyLevelOptions: [] })).toThrow("SELF_ONLY");
+    expect(() => validateCreatorSettings(draft, { ...creator, isPrivateAccount: false })).toThrow("Private");
     expect(() => validateCreatorSettings(draft, { ...creator, commentDisabled: true })).toThrow("comments");
     expect(() => validateCreatorSettings({ ...draft, videoDurationSeconds: 181 }, creator)).toThrow("limit");
     expect(() =>

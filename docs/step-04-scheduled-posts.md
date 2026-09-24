@@ -18,7 +18,7 @@ The 8,000,000,000-byte application cap still includes stored objects and active 
 - `scheduled/<job-id>/...` — retained until dispatch or cancellation; these are not covered by a fixed seven-day lifecycle.
 - `uploads/<job-id>/...` — legacy staging keys; kept under the seven-day fallback.
 
-The scheduler reconciles storage on every run. It preserves media for a valid scheduled Instagram/TikTok job, deletes released/terminal-job media immediately, gives an interrupted active upload a two-hour grace period, deletes stray replacement objects, and deletes jobless staging objects after seven days. System Status reports pending versus orphan/staging media and records cleanup events.
+The scheduler reconciles storage on every run. It preserves media for a valid scheduled Instagram/TikTok job, gives an interrupted active upload a two-hour grace period, deletes stray replacement objects, and deletes jobless staging objects after seven days. Milestone 5 supersedes terminal-job cleanup with a fixed 24-hour retry window for partial/failed jobs; successful and cancelled jobs still delete immediately.
 
 The intended lifecycle rules are:
 

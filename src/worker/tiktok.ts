@@ -62,7 +62,13 @@ export async function queryTikTokCreatorInfo(accessToken: string): Promise<TikTo
     duetDisabled: payload.duet_disabled,
     stitchDisabled: payload.stitch_disabled,
     maxVideoDurationSeconds: payload.max_video_post_duration_sec,
+    isPrivateAccount: isTikTokPrivateAccount(payload.privacy_level_options),
   };
+}
+
+export function isTikTokPrivateAccount(privacyLevelOptions: readonly string[]): boolean {
+  return privacyLevelOptions.includes("FOLLOWER_OF_CREATOR") &&
+    !privacyLevelOptions.includes("PUBLIC_TO_EVERYONE");
 }
 
 export async function initializeTikTokDirectPost(
@@ -151,6 +157,9 @@ export function validateCreatorSettings(input: DraftRequest, creator: TikTokCrea
   }
   if (!creator.privacyLevelOptions.includes("SELF_ONLY")) {
     throw new Error("TikTok did not offer SELF_ONLY for this creator; the unaudited app will not bypass that restriction.");
+  }
+  if (!creator.isPrivateAccount) {
+    throw new Error("TikTok requires this account to be Private while the app is unaudited.");
   }
   if (input.videoDurationSeconds > creator.maxVideoDurationSeconds + 0.05) {
     throw new Error(
