@@ -1,5 +1,13 @@
 import "./styles.css";
 import {
+  PLATFORMS,
+  allPlatformSelection,
+  selectedPlatformsFor,
+  selectionControlState,
+  withPlatformSelection,
+  type PlatformSelection,
+} from "./platform-selection";
+import {
   INSTAGRAM_COVER_MAX_BYTES,
   INSTAGRAM_VIDEO_MAX_BYTES,
   THUMBNAIL_MAX_BYTES,
@@ -54,6 +62,14 @@ const instagramConnectionLabel = requiredElement<HTMLElement>("instagram-connect
 const tiktokConnect = requiredElement<HTMLButtonElement>("tiktok-connect");
 const tiktokDisconnect = requiredElement<HTMLButtonElement>("tiktok-disconnect");
 const tiktokConnectionLabel = requiredElement<HTMLElement>("tiktok-connection-label");
+const selectAllPlatformsButton = requiredElement<HTMLButtonElement>("select-all-platforms");
+const selectNoPlatformsButton = requiredElement<HTMLButtonElement>("select-no-platforms");
+const platformToggleInputs = Object.fromEntries(
+  PLATFORMS.map((platform) => [
+    platform,
+    requiredElement<HTMLInputElement>(`${platform}-enabled`),
+  ]),
+) as Record<Platform, HTMLInputElement>;
 
 let videoFile: File | null = null;
 let thumbnailFile: File | null = null;
@@ -67,21 +83,23 @@ let toastTimer: number | undefined;
 let currentPercent = 0;
 let activeJobId: string | null = null;
 let cancelRequested = false;
+let platformSelection: PlatformSelection = selectionFromToggleInputs();
 const activeXhrs = new Set<XMLHttpRequest>();
 const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
 
 setupDropzone(videoDropzone, videoInput, setVideo);
 setupDropzone(thumbnailDropzone, thumbnailInput, setThumbnail);
 setupViewNavigation();
+setupPlatformSelectionControls();
 setScheduleMinimum();
 updateScheduleRequirement();
 void refreshConnectionStatuses();
 showOAuthResult();
 
-requiredElement<HTMLButtonElement>("select-all-platforms").addEventListener("click", () => {
+selectAllPlatformsButton.addEventListener("click", () => {
   setAllPlatforms(true);
 });
-requiredElement<HTMLButtonElement>("select-no-platforms").addEventListener("click", () => {
+selectNoPlatformsButton.addEventListener("click", () => {
   setAllPlatforms(false);
 });
 
@@ -121,20 +139,6 @@ tiktokConnect.addEventListener("click", () => {
 
 tiktokDisconnect.addEventListener("click", async () => {
   await disconnectPlatform("tiktok", tiktokDisconnect);
-});
-
-requiredElement<HTMLInputElement>("tiktok-enabled").addEventListener("change", () => {
-  if (requiredElement<HTMLInputElement>("tiktok-enabled").checked && tiktokConnected) {
-    void refreshTikTokCreatorInfo();
-  }
-});
-
-requiredElement<HTMLInputElement>("youtube-enabled").addEventListener("change", updateScheduleRequirement);
-requiredElement<HTMLInputElement>("instagram-enabled").addEventListener("change", updateScheduleRequirement);
-requiredElement<HTMLInputElement>("tiktok-enabled").addEventListener("change", updateScheduleRequirement);
-
-document.querySelectorAll<HTMLInputElement>(".toggle-wrap input").forEach((toggle) => {
-  toggle.addEventListener("click", (event) => event.stopPropagation());
 });
 
 cancelButton.addEventListener("click", () => {
@@ -260,6 +264,21 @@ function setupViewNavigation(): void {
       if (target === "scheduled-view") void refreshScheduledPosts();
     });
   });
+}
+
+function setupPlatformSelectionControls(): void {
+  document.querySelectorAll<HTMLElement>(".toggle-wrap").forEach((control) => {
+    control.addEventListener("click", (event) => event.stopPropagation());
+    control.addEventListener("keydown", (event) => event.stopPropagation());
+  });
+  for (const platform of PLATFORMS) {
+    platformToggleInputs[platform].addEventListener("change", () => {
+      applyPlatformSelection(
+        withPlatformSelection(platformSelection, platform, platformToggleInputs[platform].checked),
+      );
+    });
+  }
+  syncPlatformSelectionControls();
 }
 
 function setupDropzone(
@@ -1331,6 +1350,8 @@ function setBusy(isBusy: boolean): void {
 
 function resetForm(): void {
   form.reset();
+  platformSelection = selectionFromToggleInputs();
+  syncPlatformSelectionControls();
   videoFile = null;
   videoDurationSeconds = 0;
   thumbnailFile = null;
@@ -1359,7 +1380,7 @@ function setScheduleMinimum(): void {
 }
 
 function updateScheduleRequirement(): void {
-  const youtubeEnabled = requiredElement<HTMLInputElement>("youtube-enabled").checked;
+  const youtubeEnabled = platformSelection.youtube;
   scheduledAtInput.required = youtubeEnabled;
   requiredElement<HTMLElement>("timezone-label").textContent = youtubeEnabled
     ? `All selected platforms use this time (${timezone}); YouTube uses its native schedule`
@@ -1367,17 +1388,34 @@ function updateScheduleRequirement(): void {
 }
 
 function setAllPlatforms(enabled: boolean): void {
-  for (const platform of ["youtube", "instagram", "tiktok"] as Platform[]) {
-    requiredElement<HTMLInputElement>(`${platform}-enabled`).checked = enabled;
-  }
+  applyPlatformSelection(allPlatformSelection(enabled));
+}
+
+function applyPlatformSelection(next: PlatformSelection): void {
+  const enableTikTok = !platformSelection.tiktok && next.tiktok;
+  platformSelection = next;
+  for (const platform of PLATFORMS) platformToggleInputs[platform].checked = next[platform];
+  syncPlatformSelectionControls();
   updateScheduleRequirement();
-  if (enabled && tiktokConnected) void refreshTikTokCreatorInfo();
+  if (enableTikTok && tiktokConnected) void refreshTikTokCreatorInfo();
+}
+
+function syncPlatformSelectionControls(): void {
+  const state = selectionControlState(platformSelection);
+  selectAllPlatformsButton.disabled = state.allSelected;
+  selectAllPlatformsButton.setAttribute("aria-pressed", String(state.allSelected));
+  selectNoPlatformsButton.disabled = state.noneSelected;
+  selectNoPlatformsButton.setAttribute("aria-pressed", String(state.noneSelected));
+}
+
+function selectionFromToggleInputs(): PlatformSelection {
+  return Object.fromEntries(
+    PLATFORMS.map((platform) => [platform, platformToggleInputs[platform].checked]),
+  ) as PlatformSelection;
 }
 
 function selectedPlatforms(): Platform[] {
-  return (["youtube", "instagram", "tiktok"] as Platform[]).filter(
-    (platform) => requiredElement<HTMLInputElement>(`${platform}-enabled`).checked,
-  );
+  return selectedPlatformsFor(platformSelection);
 }
 
 function selectedPlatformsFromJob(job: StoredJob): Platform[] {

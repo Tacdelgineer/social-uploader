@@ -484,6 +484,7 @@ summary:focus-visible {
 .toggle-wrap {
   position: relative;
   display: inline-flex;
+  cursor: pointer;
 }
 
 .toggle-wrap input {
