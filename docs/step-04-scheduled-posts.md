@@ -46,7 +46,7 @@ https://social-uploader.nodatlaspour.workers.dev/api/oauth/instagram/callback
 
 The requested scopes remain only `instagram_business_basic` and `instagram_business_content_publish`.
 
-Every new connection verifies both permissions from the authorization, resolves the current Instagram account through the token's `/me` response, and stores that returned account ID with the same encrypted token. Tokens saved before this verification format require one reconnect. Publishing errors record the failing Graph stage plus Meta error code/subcode without logging the token.
+Every new connection verifies both permissions from the authorization and resolves the current Instagram account through that exact token's `/me?fields=id,user_id,username,account_type` response. The app-scoped `id` and professional `user_id` are stored separately; only `user_id` is used for media creation and publishing. The completed callback atomically replaces any prior encrypted connection without comparing old or new IDs. Tokens saved before this verification format require one reconnect. Publishing errors record the failing Graph stage plus Meta error code/subcode without logging the token.
 
 ## Cover compatibility
 

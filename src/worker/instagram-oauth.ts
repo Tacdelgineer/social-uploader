@@ -1,6 +1,7 @@
 import type { PlatformConnectionStatus } from "../shared/contracts";
 import { createSignedState, decryptJson, encryptJson, verifySignedState } from "./crypto";
 import type { Env } from "./env";
+import { recordAppEvent } from "./events";
 import { metaProviderError, oauthRedirect, oauthStateCookie, providerError, readCookie } from "./oauth-common";
 
 const TOKEN_KEY = "oauth:instagram";
@@ -11,11 +12,13 @@ const REFRESH_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
 const MIN_REFRESH_AGE_MS = 24 * 60 * 60 * 1000;
 
 interface StoredInstagramTokens {
-  schemaVersion: 2;
+  schemaVersion: 3;
   accessToken: string;
-  userId: string;
+  authId: string;
+  publishingUserId: string;
   permissions: string[];
   username?: string;
+  accountType?: string;
   expiresAt: number;
   refreshedAt: number;
 }
@@ -44,6 +47,7 @@ interface InstagramIdentityResponse {
   id?: string | number;
   user_id?: string | number;
   username?: string;
+  account_type?: string;
   error?: unknown;
 }
 
@@ -108,8 +112,24 @@ export async function finishInstagramOAuth(request: Request, env: Env): Promise<
   });
   const short = (await shortResponse.json()) as ShortTokenResponse;
   const shortToken = short.data?.[0] ?? short;
-  if (!shortResponse.ok || !shortToken.access_token || !shortToken.user_id) {
+  if (!shortResponse.ok || !shortToken.access_token) {
     return redirect(env, "error", providerError(short, short.error_message ?? "Instagram token exchange failed."));
+  }
+
+  let identity: InstagramIdentity;
+  let permissions = normalizeScopes(shortToken.permissions);
+  try {
+    identity = await fetchIdentity(shortToken.access_token);
+    if (permissions.length === 0) permissions = await fetchGrantedPermissions(shortToken.access_token);
+  } catch (error) {
+    return redirect(env, "error", error instanceof Error ? error.message : "Instagram authorization verification failed.");
+  }
+  if (!hasRequiredScopes(permissions)) {
+    return redirect(
+      env,
+      "error",
+      "Instagram authorization is missing instagram_business_content_publish. Reconnect Instagram and approve publishing access.",
+    );
   }
 
   const longUrl = new URL("https://graph.instagram.com/access_token");
@@ -124,39 +144,25 @@ export async function finishInstagramOAuth(request: Request, env: Env): Promise<
     return redirect(env, "error", providerError(long, "Could not create a long-lived Instagram token."));
   }
 
-  let identity: { userId: string; username?: string };
-  let permissions = normalizeScopes(shortToken.permissions);
-  try {
-    identity = await fetchIdentity(long.access_token);
-    if (identity.userId !== String(shortToken.user_id)) {
-      return redirect(
-        env,
-        "error",
-        "Instagram returned an account ID that does not match this authorization. Reconnect the intended Instagram account.",
-      );
-    }
-    if (permissions.length === 0) permissions = await fetchGrantedPermissions(long.access_token);
-  } catch (error) {
-    return redirect(env, "error", error instanceof Error ? error.message : "Instagram authorization verification failed.");
-  }
-  if (!hasRequiredScopes(permissions)) {
-    return redirect(
-      env,
-      "error",
-      "Instagram authorization is missing instagram_business_content_publish. Reconnect Instagram and approve publishing access.",
-    );
-  }
   const now = Date.now();
   const tokens: StoredInstagramTokens = {
-    schemaVersion: 2,
+    schemaVersion: 3,
     accessToken: long.access_token,
-    userId: identity.userId,
+    authId: identity.authId,
+    publishingUserId: identity.publishingUserId,
     username: identity.username,
+    accountType: identity.accountType,
     permissions,
     expiresAt: now + long.expires_in * 1000,
     refreshedAt: now,
   };
   await env.METADATA.put(TOKEN_KEY, await encryptJson(tokens, env.OAUTH_ENCRYPTION_KEY));
+  await recordAppEvent(env, {
+    level: "info",
+    category: "oauth",
+    platform: "instagram",
+    message: instagramIdentityDiagnostic(identity),
+  });
   return redirect(env, "connected");
 }
 
@@ -197,7 +203,13 @@ export async function getInstagramCredentials(
   const encrypted = await env.METADATA.get(TOKEN_KEY);
   if (!encrypted) throw new Error("Connect Instagram before submitting an Instagram Reel.");
   let tokens = await decryptJson<StoredInstagramTokens>(encrypted, env.OAUTH_ENCRYPTION_KEY);
-  if (tokens.schemaVersion !== 2 || !Array.isArray(tokens.permissions) || !hasRequiredScopes(tokens.permissions)) {
+  if (
+    tokens.schemaVersion !== 3 ||
+    typeof tokens.authId !== "string" ||
+    typeof tokens.publishingUserId !== "string" ||
+    !Array.isArray(tokens.permissions) ||
+    !hasRequiredScopes(tokens.permissions)
+  ) {
     throw new Error(
       "Reconnect Instagram once to verify instagram_business_content_publish and bind the current account ID to its token.",
     );
@@ -209,7 +221,7 @@ export async function getInstagramCredentials(
   if (tokens.expiresAt <= now + REFRESH_WINDOW_MS && now - tokens.refreshedAt >= MIN_REFRESH_AGE_MS) {
     tokens = await refreshTokens(tokens, env);
   }
-  return { accessToken: tokens.accessToken, userId: tokens.userId, username: tokens.username };
+  return { accessToken: tokens.accessToken, userId: tokens.publishingUserId, username: tokens.username };
 }
 
 async function refreshTokens(tokens: StoredInstagramTokens, env: Env): Promise<StoredInstagramTokens> {
@@ -233,16 +245,38 @@ async function refreshTokens(tokens: StoredInstagramTokens, env: Env): Promise<S
   return refreshed;
 }
 
-async function fetchIdentity(accessToken: string): Promise<{ userId: string; username?: string }> {
+interface InstagramIdentity {
+  authId: string;
+  publishingUserId: string;
+  username?: string;
+  accountType?: string;
+}
+
+async function fetchIdentity(accessToken: string): Promise<InstagramIdentity> {
   const url = new URL("https://graph.instagram.com/v26.0/me");
-  url.searchParams.set("fields", "user_id,username");
+  url.searchParams.set("fields", "id,user_id,username,account_type");
   const response = await fetch(url, { headers: { authorization: `Bearer ${accessToken}` } });
   const payload = (await response.json()) as InstagramIdentityResponse;
-  const userId = payload.user_id ?? payload.id;
-  if (!response.ok || userId === undefined) {
+  if (!response.ok || payload.id === undefined || payload.user_id === undefined) {
     throw new Error(metaProviderError(payload, "Could not verify the authorized Instagram account.", "oauth_identity"));
   }
-  return { userId: String(userId), username: payload.username };
+  return {
+    authId: String(payload.id),
+    publishingUserId: String(payload.user_id),
+    username: payload.username,
+    accountType: payload.account_type,
+  };
+}
+
+function instagramIdentityDiagnostic(identity: InstagramIdentity): string {
+  return [
+    "Instagram Login identity verified",
+    `id=${identity.authId}`,
+    `user_id=${identity.publishingUserId}`,
+    `username=${identity.username ?? "unavailable"}`,
+    `account_type=${identity.accountType ?? "unavailable"}`,
+    `publishing_id=user_id:${identity.publishingUserId}`,
+  ].join("; ");
 }
 
 async function fetchGrantedPermissions(accessToken: string): Promise<string[]> {
