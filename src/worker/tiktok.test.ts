@@ -1,6 +1,6 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { DraftRequest, TikTokCreatorInfo } from "../shared/contracts";
-import { calculateTikTokChunks, validateCreatorSettings } from "./tiktok";
+import { calculateTikTokChunks, initializeTikTokDirectPost, validateCreatorSettings } from "./tiktok";
 
 const mebibyte = 1024 * 1024;
 
@@ -20,6 +20,7 @@ const draft: DraftRequest = {
     allowDuet: false,
     allowStitch: false,
     coverTimestampMs: 1_000,
+    consentConfirmed: true,
   },
   assets: {
     video: { key: "uploads/id/video.mp4", originalName: "short.mp4", contentType: "video/mp4", size: 70 * mebibyte },
@@ -38,6 +39,8 @@ const creator: TikTokCreatorInfo = {
 };
 
 describe("TikTok Direct Post", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
   it("uses one whole upload below 64 MiB and multiple valid chunks above it", () => {
     expect(calculateTikTokChunks(4 * mebibyte)).toEqual({ chunkSize: 4 * mebibyte, totalChunkCount: 1 });
     const chunks = calculateTikTokChunks(70 * mebibyte);
@@ -50,6 +53,7 @@ describe("TikTok Direct Post", () => {
   });
 
   it("rejects unavailable privacy, interactions, duration, or cover timestamps", () => {
+    expect(() => validateCreatorSettings({ ...draft, tiktok: { ...draft.tiktok, consentConfirmed: false } }, creator)).toThrow("consent");
     expect(() => validateCreatorSettings(draft, { ...creator, privacyLevelOptions: [] })).toThrow("SELF_ONLY");
     expect(() => validateCreatorSettings(draft, { ...creator, commentDisabled: true })).toThrow("comments");
     expect(() => validateCreatorSettings({ ...draft, videoDurationSeconds: 181 }, creator)).toThrow("limit");
@@ -59,5 +63,19 @@ describe("TikTok Direct Post", () => {
         creator,
       ),
     ).toThrow("cover timestamp");
+  });
+
+  it("surfaces the provider stage, error.code, and log_id for unaudited private-account failures", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      error: {
+        code: "unaudited_client_can_only_post_to_private_accounts",
+        message: "Please review our integration guidelines",
+        log_id: "2026092503402087C8D3FBCE4C2A11608B",
+      },
+    }), { status: 403, headers: { "content-type": "application/json" } })));
+
+    await expect(initializeTikTokDirectPost(draft, "not-a-real-token", creator)).rejects.toThrow(
+      /video\/init.*unaudited_client_can_only_post_to_private_accounts.*must be switched to Private.*2026092503402087C8D3FBCE4C2A11608B/u,
+    );
   });
 });

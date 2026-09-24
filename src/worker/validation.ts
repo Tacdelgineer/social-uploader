@@ -107,6 +107,8 @@ export function validateDraftRequest(value: unknown, now = new Date()): DraftReq
     typeof tiktok.allowComments !== "boolean" ||
     typeof tiktok.allowDuet !== "boolean" ||
     typeof tiktok.allowStitch !== "boolean" ||
+    typeof tiktok.consentConfirmed !== "boolean" ||
+    (platforms.tiktok && !tiktok.consentConfirmed) ||
     typeof tiktok.coverTimestampMs !== "number" ||
     !Number.isSafeInteger(tiktok.coverTimestampMs) ||
     tiktok.coverTimestampMs < 0 ||

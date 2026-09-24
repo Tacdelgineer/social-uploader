@@ -45,3 +45,16 @@ export function providerError(payload: unknown, fallback: string): string {
   if (typeof value.error === "string") return value.error_description ?? value.error;
   return value.error_description ?? value.message ?? fallback;
 }
+
+export function metaProviderError(payload: unknown, fallback: string, stage: string): string {
+  const detail = providerError(payload, fallback);
+  if (typeof payload !== "object" || payload === null) return `Instagram ${stage} failed: ${detail}`;
+  const error = (payload as {
+    error?: { code?: string | number; error_subcode?: string | number };
+  }).error;
+  const identifiers = [
+    error?.code === undefined ? undefined : `code ${String(error.code)}`,
+    error?.error_subcode === undefined ? undefined : `subcode ${String(error.error_subcode)}`,
+  ].filter((value): value is string => Boolean(value));
+  return `Instagram ${stage} failed${identifiers.length ? ` [Meta ${identifiers.join(", ")}]` : ""}: ${detail}`;
+}

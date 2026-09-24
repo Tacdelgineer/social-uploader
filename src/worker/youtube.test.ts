@@ -18,6 +18,7 @@ const input: DraftRequest = {
     allowDuet: false,
     allowStitch: false,
     coverTimestampMs: 0,
+    consentConfirmed: false,
   },
   assets: {
     video: { key: "uploads/id/video.mp4", originalName: "short.mp4", contentType: "video/mp4", size: 123 },

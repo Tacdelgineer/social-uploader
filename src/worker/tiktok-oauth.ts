@@ -150,6 +150,9 @@ export async function getTikTokCredentials(
   const now = Date.now();
   if (tokens.refreshExpiresAt <= now + 60_000) throw new Error("TikTok authorization expired. Reconnect TikTok.");
   if (tokens.expiresAt <= now + REFRESH_WINDOW_MS) tokens = await refreshTokens(tokens, env);
+  if (!hasRequiredScopes(tokens.scope)) {
+    throw new Error("TikTok authorization lacks video.publish. Reconnect TikTok and approve Direct Post access.");
+  }
   return { accessToken: tokens.accessToken, openId: tokens.openId, displayName: tokens.displayName };
 }
 
@@ -167,6 +170,9 @@ async function refreshTokens(tokens: StoredTikTokTokens, env: Env): Promise<Stor
   const payload = (await response.json()) as TikTokTokenResponse;
   if (!response.ok || !isCompleteTokenResponse(payload)) {
     throw new Error(providerError(payload, "TikTok authorization could not be refreshed. Reconnect TikTok."));
+  }
+  if (!hasRequiredScopes(payload.scope)) {
+    throw new Error("TikTok authorization refresh no longer includes video.publish. Reconnect TikTok.");
   }
   const now = Date.now();
   const refreshed: StoredTikTokTokens = {
@@ -208,7 +214,7 @@ function isCompleteTokenResponse(payload: TikTokTokenResponse): payload is Requi
 }
 
 function hasRequiredScopes(scope: string): boolean {
-  const granted = new Set(scope.split(","));
+  const granted = new Set(scope.split(",").map((value) => value.trim()));
   return granted.has("user.info.basic") && granted.has("video.publish");
 }
 

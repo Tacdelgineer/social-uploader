@@ -8,12 +8,11 @@ import {
   type PlatformSelection,
 } from "./platform-selection";
 import {
-  INSTAGRAM_COVER_MAX_BYTES,
   INSTAGRAM_VIDEO_MAX_BYTES,
+  THUMBNAIL_CONTENT_TYPES,
   THUMBNAIL_MAX_BYTES,
   VIDEO_CONTENT_TYPES,
   VIDEO_MAX_BYTES,
-  YOUTUBE_THUMBNAIL_CONTENT_TYPES,
   type ApiError,
   type CompleteYouTubeResponse,
   type CreateJobResponse,
@@ -33,6 +32,7 @@ import {
   type TikTokStartResponse,
   type YouTubeConnectionStatus,
 } from "../shared/contracts";
+import { prepareThumbnailForPlatforms } from "./thumbnail";
 
 type UploadState = "uploading" | "processing" | "scheduled" | "failed" | "cancelled";
 
@@ -62,6 +62,7 @@ const instagramConnectionLabel = requiredElement<HTMLElement>("instagram-connect
 const tiktokConnect = requiredElement<HTMLButtonElement>("tiktok-connect");
 const tiktokDisconnect = requiredElement<HTMLButtonElement>("tiktok-disconnect");
 const tiktokConnectionLabel = requiredElement<HTMLElement>("tiktok-connection-label");
+const tiktokDirectPostConsent = requiredElement<HTMLInputElement>("tiktok-direct-post-consent");
 const selectAllPlatformsButton = requiredElement<HTMLButtonElement>("select-all-platforms");
 const selectNoPlatformsButton = requiredElement<HTMLButtonElement>("select-no-platforms");
 const platformToggleInputs = Object.fromEntries(
@@ -169,8 +170,12 @@ form.addEventListener("submit", async (event) => {
   const platformErrors: string[] = [];
 
   try {
+    setProgress("uploading", "Preparing a compatible cover...", 1);
+    const uploadThumbnail = await prepareThumbnailForPlatforms(thumbnailFile!, selected);
+    if (uploadThumbnail !== thumbnailFile) showPreparedThumbnail(uploadThumbnail);
+    throwIfCancelled();
     setProgress("uploading", "Reserving capped temporary storage...", 3);
-    const reservation = await requestPresign(jobId, videoFile!, thumbnailFile!, selected);
+    const reservation = await requestPresign(jobId, videoFile!, uploadThumbnail, selected);
     throwIfCancelled();
     const { video: videoUpload, thumbnail: thumbnailUpload } = reservation.uploads;
 
@@ -179,17 +184,17 @@ form.addEventListener("submit", async (event) => {
     await Promise.all([
       uploadDirectToR2(videoUpload.uploadUrl, videoFile!, (value) => {
         progress.video = value;
-        setR2Progress(progress);
+        setR2Progress(progress, uploadThumbnail);
       }),
-      uploadDirectToR2(thumbnailUpload.uploadUrl, thumbnailFile!, (value) => {
+      uploadDirectToR2(thumbnailUpload.uploadUrl, uploadThumbnail, (value) => {
         progress.thumbnail = value;
-        setR2Progress(progress);
+        setR2Progress(progress, uploadThumbnail);
       }),
     ]);
     throwIfCancelled();
 
     setProgress("uploading", "Creating provider upload job...", 48);
-    const job = buildJob(jobId, videoUpload.objectKey, thumbnailUpload.objectKey);
+    const job = buildJob(jobId, videoUpload.objectKey, thumbnailUpload.objectKey, uploadThumbnail);
     const created = await apiRequest<CreateJobResponse>("/api/jobs", {
       method: "POST",
       body: JSON.stringify(job),
@@ -344,8 +349,8 @@ function setVideo(file: File): void {
 }
 
 function setThumbnail(file: File): void {
-  if (!(YOUTUBE_THUMBNAIL_CONTENT_TYPES as readonly string[]).includes(file.type)) {
-    showToast("Choose a JPG or PNG thumbnail for YouTube.", true);
+  if (!(THUMBNAIL_CONTENT_TYPES as readonly string[]).includes(file.type)) {
+    showToast("Choose a JPG, PNG, or WebP cover.", true);
     return;
   }
   if (file.size <= 0 || file.size > THUMBNAIL_MAX_BYTES) {
@@ -360,6 +365,15 @@ function setThumbnail(file: File): void {
   thumbnailObjectUrl = URL.createObjectURL(file);
   requiredElement<HTMLElement>("thumbnail-preview").style.backgroundImage = `url("${thumbnailObjectUrl}")`;
   requiredElement<HTMLElement>("thumbnail-preview").classList.add("has-image");
+}
+
+function showPreparedThumbnail(file: File): void {
+  requiredElement<HTMLElement>("thumbnail-name").textContent = file.name;
+  requiredElement<HTMLElement>("thumbnail-meta").textContent =
+    `${formatBytes(file.size)} - converted JPEG for selected platforms`;
+  if (thumbnailObjectUrl) URL.revokeObjectURL(thumbnailObjectUrl);
+  thumbnailObjectUrl = URL.createObjectURL(file);
+  requiredElement<HTMLElement>("thumbnail-preview").style.backgroundImage = `url("${thumbnailObjectUrl}")`;
 }
 
 function validateForm(): boolean {
@@ -406,10 +420,6 @@ function validateForm(): boolean {
       showToast("Instagram Reels must be between 3 seconds and 15 minutes.", true);
       return false;
     }
-    if (thumbnailFile.type !== "image/jpeg" || thumbnailFile.size > INSTAGRAM_COVER_MAX_BYTES) {
-      showToast("Instagram Reel covers must be JPEG and no larger than 8 MB.", true);
-      return false;
-    }
   }
   if (platforms.includes("tiktok")) {
     if (!tiktokCreatorInfo) {
@@ -426,6 +436,11 @@ function validateForm(): boolean {
       showToast("TikTok cover timestamp must be a whole millisecond inside the video.", true);
       return false;
     }
+    if (!tiktokDirectPostConsent.checked) {
+      showToast("Confirm that you want Social Uploader to send this video directly to TikTok.", true);
+      tiktokDirectPostConsent.focus();
+      return false;
+    }
   }
   if (!form.reportValidity()) return false;
   const publishAt = scheduledAtInput.value ? new Date(scheduledAtInput.value) : null;
@@ -440,7 +455,7 @@ function validateForm(): boolean {
   return true;
 }
 
-function buildJob(jobId: string, videoKey: string, thumbnailKey: string): DraftRequest {
+function buildJob(jobId: string, videoKey: string, thumbnailKey: string, uploadThumbnail: File): DraftRequest {
   const platforms = selectedPlatforms();
   return {
     id: jobId,
@@ -467,10 +482,11 @@ function buildJob(jobId: string, videoKey: string, thumbnailKey: string): DraftR
       allowDuet: requiredElement<HTMLInputElement>("tiktok-duet").checked,
       allowStitch: requiredElement<HTMLInputElement>("tiktok-stitch").checked,
       coverTimestampMs: Number(requiredElement<HTMLInputElement>("tiktok-cover-timestamp").value),
+      consentConfirmed: tiktokDirectPostConsent.checked,
     },
     assets: {
       video: toAsset(videoKey, videoFile!),
-      thumbnail: toAsset(thumbnailKey, thumbnailFile!),
+      thumbnail: toAsset(thumbnailKey, uploadThumbnail),
     },
   };
 }
@@ -802,7 +818,12 @@ async function refreshConnectionStatuses(): Promise<void> {
     youtubeConnectionLabel.textContent = "Connection check failed";
   }
   if (instagram.status === "fulfilled") {
-    setInstagramConnection(instagram.value.connected, instagram.value.displayName);
+    setInstagramConnection(
+      instagram.value.connected,
+      instagram.value.displayName,
+      instagram.value.requiresReconnect,
+      instagram.value.message,
+    );
   } else {
     setInstagramConnection(false);
     instagramConnectionLabel.textContent = "Connection check failed";
@@ -824,12 +845,22 @@ function setYouTubeConnection(connected: boolean): void {
   youtubeDisconnect.hidden = !connected;
 }
 
-function setInstagramConnection(connected: boolean, displayName?: string): void {
+function setInstagramConnection(
+  connected: boolean,
+  displayName?: string,
+  requiresReconnect = false,
+  message?: string,
+): void {
   instagramConnected = connected;
-  instagramConnectionLabel.textContent = connected ? displayName ?? "Connected" : "Not connected";
+  instagramConnectionLabel.textContent = connected
+    ? displayName ?? "Connected"
+    : requiresReconnect
+      ? "Reconnect required"
+      : "Not connected";
+  instagramConnectionLabel.title = message ?? "";
   instagramConnectionLabel.classList.toggle("is-connected", connected);
-  instagramConnect.textContent = connected ? "Reconnect Instagram" : "Connect Instagram";
-  instagramDisconnect.hidden = !connected;
+  instagramConnect.textContent = connected || requiresReconnect ? "Reconnect Instagram" : "Connect Instagram";
+  instagramDisconnect.hidden = !connected && !requiresReconnect;
 }
 
 function setTikTokConnection(connected: boolean, displayName?: string): void {
@@ -1022,6 +1053,10 @@ function createScheduledEditForm(post: ScheduledPostSummary): HTMLFormElement {
   cover.input.type = "number";
   cover.input.min = "0";
   cover.input.step = "1";
+  const consent = checkboxControl(
+    "I consent to Social Uploader sending this scheduled video and caption directly to TikTok",
+    post.tiktok.consentConfirmed === true,
+  );
 
   const thumbnail = document.createElement("input");
   thumbnail.type = "file";
@@ -1048,6 +1083,7 @@ function createScheduledEditForm(post: ScheduledPostSummary): HTMLFormElement {
     duet.label,
     stitch.label,
     cover.field,
+    consent.label,
     thumbnailField,
     note,
     save,
@@ -1062,10 +1098,18 @@ function createScheduledEditForm(post: ScheduledPostSummary): HTMLFormElement {
       showToast("Keep at least one destination, or cancel the post.", true);
       return;
     }
+    if (selected.includes("tiktok") && !consent.input.checked) {
+      showToast("Confirm consent before scheduling a TikTok Direct Post.", true);
+      consent.input.focus();
+      return;
+    }
     save.disabled = true;
     try {
       const replacement = thumbnail.files?.[0];
-      if (replacement) await uploadScheduledThumbnail(post.id, replacement);
+      if (replacement) {
+        const preparedReplacement = await prepareThumbnailForPlatforms(replacement, selected);
+        await uploadScheduledThumbnail(post.id, preparedReplacement);
+      }
       const input: EditScheduledPostRequest = {
         title: title.input.value.trim(),
         description: description.value,
@@ -1083,6 +1127,7 @@ function createScheduledEditForm(post: ScheduledPostSummary): HTMLFormElement {
           allowDuet: duet.input.checked,
           allowStitch: stitch.input.checked,
           coverTimestampMs: Number(cover.input.value),
+          consentConfirmed: consent.input.checked,
         },
       };
       await apiRequest(`/api/jobs/${encodeURIComponent(post.id)}`, {
@@ -1321,9 +1366,9 @@ function toAsset(key: string, file: File) {
   return { key, originalName: file.name, contentType: file.type, size: file.size };
 }
 
-function setR2Progress(progress: { video: number; thumbnail: number }): void {
-  const totalBytes = videoFile!.size + thumbnailFile!.size;
-  const uploadedBytes = videoFile!.size * progress.video + thumbnailFile!.size * progress.thumbnail;
+function setR2Progress(progress: { video: number; thumbnail: number }, uploadThumbnail: File): void {
+  const totalBytes = videoFile!.size + uploadThumbnail.size;
+  const uploadedBytes = videoFile!.size * progress.video + uploadThumbnail.size * progress.thumbnail;
   setProgress("uploading", "Staging files directly in R2...", 6 + Math.round((uploadedBytes / totalBytes) * 40));
 }
 
@@ -1360,7 +1405,7 @@ function resetForm(): void {
   requiredElement<HTMLElement>("video-name").textContent = "Drop your MP4 here";
   requiredElement<HTMLElement>("video-meta").textContent = "or click to choose a file - up to 2 GB";
   requiredElement<HTMLElement>("thumbnail-name").textContent = "Choose a thumbnail";
-  requiredElement<HTMLElement>("thumbnail-meta").textContent = "JPG or PNG - up to 10 MB";
+  requiredElement<HTMLElement>("thumbnail-meta").textContent = "JPG, PNG, or WebP - up to 10 MB";
   requiredElement<HTMLElement>("thumbnail-preview").style.backgroundImage = "";
   requiredElement<HTMLElement>("thumbnail-preview").classList.remove("has-image");
   if (thumbnailObjectUrl) URL.revokeObjectURL(thumbnailObjectUrl);

@@ -45,7 +45,7 @@
                   <p class="step-label">01 - Media</p>
                   <h2 id="media-heading">Choose files</h2>
                 </div>
-                <p class="section-hint">MP4 video and a JPG or PNG cover</p>
+                <p class="section-hint">MP4 video and a JPG, PNG, or WebP cover</p>
               </div>
 
               <div class="upload-grid">
@@ -75,7 +75,7 @@
                   tabindex="0"
                   aria-controls="thumbnail-input"
                 >
-                  <input id="thumbnail-input" type="file" accept="image/jpeg,image/png,.jpg,.jpeg,.png" hidden />
+                  <input id="thumbnail-input" type="file" accept="image/jpeg,image/png,image/webp,.jpg,.jpeg,.png,.webp" hidden />
                   <div id="thumbnail-preview" class="thumbnail-preview" aria-hidden="true">
                     <svg viewBox="0 0 24 24" focusable="false">
                       <path d="M4 16l4.5-5 3.5 4 2.5-3 5.5 6H4v-2Zm0-10h16v12H4V6Zm11 3.5h.01" />
@@ -83,7 +83,7 @@
                   </div>
                   <div>
                     <strong id="thumbnail-name">Choose a thumbnail</strong>
-                    <span id="thumbnail-meta">JPG or PNG - up to 10 MB</span>
+                    <span id="thumbnail-meta">JPG, PNG, or WebP - up to 10 MB</span>
                   </div>
                 </div>
               </div>
@@ -239,7 +239,11 @@
                       <input id="tiktok-cover-timestamp" type="number" min="0" step="1" value="0" />
                     </label>
                     <p id="tiktok-creator-info" class="settings-note">Connect TikTok to load creator posting limits.</p>
-                    <p class="settings-note restriction-note">Scheduled by Social Uploader; TikTok receives it at publish time. Direct Post uses FILE_UPLOAD and is forced to SELF_ONLY while unaudited.</p>
+                    <label class="check-field consent-field">
+                      <input id="tiktok-direct-post-consent" type="checkbox" />
+                      <span>I consent to Social Uploader sending this video and caption directly to TikTok.</span>
+                    </label>
+                    <p class="settings-note restriction-note">Direct Post uses FILE_UPLOAD and is forced to SELF_ONLY. While this app is unaudited, the connected TikTok account must also be set to Private.</p>
                   </div>
                 </details>
               </div>

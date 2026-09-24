@@ -1,7 +1,7 @@
 import type { PlatformConnectionStatus } from "../shared/contracts";
 import { createSignedState, decryptJson, encryptJson, verifySignedState } from "./crypto";
 import type { Env } from "./env";
-import { oauthRedirect, oauthStateCookie, providerError, readCookie } from "./oauth-common";
+import { metaProviderError, oauthRedirect, oauthStateCookie, providerError, readCookie } from "./oauth-common";
 
 const TOKEN_KEY = "oauth:instagram";
 const STATE_COOKIE = "instagram_oauth_state";
@@ -11,8 +11,10 @@ const REFRESH_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
 const MIN_REFRESH_AGE_MS = 24 * 60 * 60 * 1000;
 
 interface StoredInstagramTokens {
+  schemaVersion: 2;
   accessToken: string;
   userId: string;
+  permissions: string[];
   username?: string;
   expiresAt: number;
   refreshedAt: number;
@@ -35,6 +37,18 @@ interface LongTokenResponse {
   access_token?: string;
   token_type?: string;
   expires_in?: number;
+  error?: unknown;
+}
+
+interface InstagramIdentityResponse {
+  id?: string | number;
+  user_id?: string | number;
+  username?: string;
+  error?: unknown;
+}
+
+interface InstagramPermissionsResponse {
+  data?: Array<{ permission?: string; status?: string }>;
   error?: unknown;
 }
 
@@ -97,9 +111,6 @@ export async function finishInstagramOAuth(request: Request, env: Env): Promise<
   if (!shortResponse.ok || !shortToken.access_token || !shortToken.user_id) {
     return redirect(env, "error", providerError(short, short.error_message ?? "Instagram token exchange failed."));
   }
-  if (shortToken.permissions && !hasRequiredScopes(shortToken.permissions)) {
-    return redirect(env, "error", "Instagram did not grant both basic and content publishing permissions.");
-  }
 
   const longUrl = new URL("https://graph.instagram.com/access_token");
   longUrl.search = new URLSearchParams({
@@ -113,12 +124,35 @@ export async function finishInstagramOAuth(request: Request, env: Env): Promise<
     return redirect(env, "error", providerError(long, "Could not create a long-lived Instagram token."));
   }
 
-  const username = await fetchUsername(long.access_token);
+  let identity: { userId: string; username?: string };
+  let permissions = normalizeScopes(shortToken.permissions);
+  try {
+    identity = await fetchIdentity(long.access_token);
+    if (identity.userId !== String(shortToken.user_id)) {
+      return redirect(
+        env,
+        "error",
+        "Instagram returned an account ID that does not match this authorization. Reconnect the intended Instagram account.",
+      );
+    }
+    if (permissions.length === 0) permissions = await fetchGrantedPermissions(long.access_token);
+  } catch (error) {
+    return redirect(env, "error", error instanceof Error ? error.message : "Instagram authorization verification failed.");
+  }
+  if (!hasRequiredScopes(permissions)) {
+    return redirect(
+      env,
+      "error",
+      "Instagram authorization is missing instagram_business_content_publish. Reconnect Instagram and approve publishing access.",
+    );
+  }
   const now = Date.now();
   const tokens: StoredInstagramTokens = {
+    schemaVersion: 2,
     accessToken: long.access_token,
-    userId: String(shortToken.user_id),
-    username,
+    userId: identity.userId,
+    username: identity.username,
+    permissions,
     expiresAt: now + long.expires_in * 1000,
     refreshedAt: now,
   };
@@ -130,8 +164,13 @@ export async function instagramConnectionStatus(env: Env): Promise<PlatformConne
   try {
     const credentials = await getInstagramCredentials(env);
     return { connected: true, displayName: credentials.username ? `@${credentials.username}` : undefined };
-  } catch {
-    return { connected: false };
+  } catch (error) {
+    const requiresReconnect = Boolean(await env.METADATA.get(TOKEN_KEY));
+    return {
+      connected: false,
+      requiresReconnect,
+      message: requiresReconnect && error instanceof Error ? error.message : undefined,
+    };
   }
 }
 
@@ -158,6 +197,11 @@ export async function getInstagramCredentials(
   const encrypted = await env.METADATA.get(TOKEN_KEY);
   if (!encrypted) throw new Error("Connect Instagram before submitting an Instagram Reel.");
   let tokens = await decryptJson<StoredInstagramTokens>(encrypted, env.OAUTH_ENCRYPTION_KEY);
+  if (tokens.schemaVersion !== 2 || !Array.isArray(tokens.permissions) || !hasRequiredScopes(tokens.permissions)) {
+    throw new Error(
+      "Reconnect Instagram once to verify instagram_business_content_publish and bind the current account ID to its token.",
+    );
+  }
   const now = Date.now();
   if (tokens.expiresAt <= now + 60_000) {
     throw new Error("Instagram authorization expired. Reconnect Instagram.");
@@ -189,17 +233,42 @@ async function refreshTokens(tokens: StoredInstagramTokens, env: Env): Promise<S
   return refreshed;
 }
 
-async function fetchUsername(accessToken: string): Promise<string | undefined> {
+async function fetchIdentity(accessToken: string): Promise<{ userId: string; username?: string }> {
   const url = new URL("https://graph.instagram.com/v26.0/me");
   url.searchParams.set("fields", "user_id,username");
   const response = await fetch(url, { headers: { authorization: `Bearer ${accessToken}` } });
-  if (!response.ok) return undefined;
-  const payload = (await response.json()) as { username?: string };
-  return payload.username;
+  const payload = (await response.json()) as InstagramIdentityResponse;
+  const userId = payload.user_id ?? payload.id;
+  if (!response.ok || userId === undefined) {
+    throw new Error(metaProviderError(payload, "Could not verify the authorized Instagram account.", "oauth_identity"));
+  }
+  return { userId: String(userId), username: payload.username };
+}
+
+async function fetchGrantedPermissions(accessToken: string): Promise<string[]> {
+  const response = await fetch("https://graph.instagram.com/v26.0/me/permissions", {
+    headers: { authorization: `Bearer ${accessToken}` },
+  });
+  const payload = (await response.json()) as InstagramPermissionsResponse;
+  if (!response.ok || !Array.isArray(payload.data)) {
+    throw new Error(
+      metaProviderError(payload, "Could not verify Instagram publishing permissions.", "oauth_permissions"),
+    );
+  }
+  return payload.data
+    .filter((permission) => permission.status === "granted" && typeof permission.permission === "string")
+    .map((permission) => permission.permission!);
+}
+
+function normalizeScopes(permissions?: string | string[]): string[] {
+  if (!permissions) return [];
+  return (Array.isArray(permissions) ? permissions : permissions.split(","))
+    .map((permission) => permission.trim())
+    .filter(Boolean);
 }
 
 function hasRequiredScopes(permissions: string | string[]): boolean {
-  const granted = new Set(Array.isArray(permissions) ? permissions : permissions.split(","));
+  const granted = new Set(normalizeScopes(permissions));
   return granted.has("instagram_business_basic") && granted.has("instagram_business_content_publish");
 }
 

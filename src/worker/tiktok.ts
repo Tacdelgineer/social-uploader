@@ -1,5 +1,4 @@
 import type { DraftRequest, TikTokCreatorInfo } from "../shared/contracts";
-import { providerError } from "./oauth-common";
 
 const API_ROOT = "https://open.tiktokapis.com/v2/post/publish";
 const MAX_CHUNK_SIZE = 64 * 1024 * 1024;
@@ -41,6 +40,7 @@ export async function queryTikTokCreatorInfo(accessToken: string): Promise<TikTo
     `${API_ROOT}/creator_info/query/`,
     accessToken,
     {},
+    "creator_info/query",
     "TikTok could not load creator posting settings.",
   );
   if (
@@ -92,6 +92,7 @@ export async function initializeTikTokDirectPost(
         total_chunk_count: totalChunkCount,
       },
     },
+    "video/init",
     "TikTok refused to initialize Direct Post.",
   );
   if (!payload.publish_id || !payload.upload_url) {
@@ -118,6 +119,7 @@ export async function fetchTikTokPostStatus(
     `${API_ROOT}/status/fetch/`,
     accessToken,
     { publish_id: publishId },
+    "status/fetch",
     "TikTok could not read the Direct Post status.",
   );
   if (!payload.status) throw new Error("TikTok returned an incomplete Direct Post status.");
@@ -144,6 +146,9 @@ export function calculateTikTokChunks(videoSize: number): {
 }
 
 export function validateCreatorSettings(input: DraftRequest, creator: TikTokCreatorInfo): void {
+  if (!input.tiktok.consentConfirmed) {
+    throw new Error("TikTok Direct Post requires the user's explicit consent before initialization.");
+  }
   if (!creator.privacyLevelOptions.includes("SELF_ONLY")) {
     throw new Error("TikTok did not offer SELF_ONLY for this creator; the unaudited app will not bypass that restriction.");
   }
@@ -170,6 +175,7 @@ async function tiktokRequest<T>(
   url: string,
   accessToken: string,
   body: unknown,
+  stage: string,
   fallback: string,
 ): Promise<T> {
   const response = await fetch(url, {
@@ -184,8 +190,14 @@ async function tiktokRequest<T>(
   const code = envelope.error?.code;
   if (!response.ok || code !== "ok" || !envelope.data) {
     const logId = envelope.error?.log_id ?? envelope.error?.logid;
-    const detail = envelope.error?.message ?? providerError(envelope, fallback);
-    throw new Error(`${detail || fallback}${logId ? ` (TikTok log ${logId})` : ""}`);
+    const detail = envelope.error?.message || fallback;
+    const privateAccountHelp = code === "unaudited_client_can_only_post_to_private_accounts"
+      ? " The connected TikTok account must be switched to Private while this app is unaudited."
+      : "";
+    throw new Error(
+      `TikTok ${stage} failed${code ? ` [error.code: ${code}]` : ""}: ${detail}.${privateAccountHelp}` +
+      `${logId ? ` (log_id: ${logId})` : ""}`,
+    );
   }
   return envelope.data;
 }

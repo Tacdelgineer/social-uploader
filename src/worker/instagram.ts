@@ -1,5 +1,5 @@
 import type { DraftRequest } from "../shared/contracts";
-import { providerError } from "./oauth-common";
+import { metaProviderError } from "./oauth-common";
 
 const GRAPH_ROOT = "https://graph.instagram.com/v26.0";
 
@@ -36,7 +36,9 @@ export async function createInstagramReelContainer(
   });
   const payload = (await response.json()) as GraphResponse;
   if (!response.ok || !payload.id) {
-    throw new Error(providerError(payload, `Instagram rejected the Reel container (HTTP ${response.status}).`));
+    throw new Error(
+      metaProviderError(payload, `Instagram rejected the Reel container (HTTP ${response.status}).`, "container_create"),
+    );
   }
   return payload.id;
 }
@@ -50,7 +52,9 @@ export async function getInstagramContainerStatus(
   const response = await fetch(url, { headers: { authorization: `Bearer ${accessToken}` } });
   const payload = (await response.json()) as ContainerResponse;
   if (!response.ok || !payload.status_code) {
-    throw new Error(providerError(payload, `Could not read Instagram Reel status (HTTP ${response.status}).`));
+    throw new Error(
+      metaProviderError(payload, `Could not read Instagram Reel status (HTTP ${response.status}).`, "container_status"),
+    );
   }
   return { statusCode: payload.status_code, detail: payload.status };
 }
@@ -70,7 +74,9 @@ export async function publishInstagramReel(
   });
   const payload = (await response.json()) as GraphResponse;
   if (!response.ok || !payload.id) {
-    throw new Error(providerError(payload, `Instagram could not publish the Reel (HTTP ${response.status}).`));
+    throw new Error(
+      metaProviderError(payload, `Instagram could not publish the Reel (HTTP ${response.status}).`, "media_publish"),
+    );
   }
   return payload.id;
 }
@@ -88,7 +94,7 @@ export async function verifyInstagramReel(
     permalink?: string;
   };
   if (!response.ok || payload.id !== mediaId) {
-    return [providerError(payload, "Instagram published the Reel, but verification was unavailable.")];
+    return [metaProviderError(payload, "Instagram published the Reel, but verification was unavailable.", "media_verify")];
   }
   return payload.media_product_type === "REELS" || payload.media_type === "VIDEO"
     ? []

@@ -19,6 +19,7 @@ const base: StoredJob = {
     allowDuet: false,
     allowStitch: false,
     coverTimestampMs: 0,
+    consentConfirmed: false,
   },
   assets: {
     video: { key: "scheduled/id/video.mp4", originalName: "short.mp4", contentType: "video/mp4", size: 123 },

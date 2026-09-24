@@ -79,6 +79,7 @@ export interface TikTokSettings {
   allowDuet: boolean;
   allowStitch: boolean;
   coverTimestampMs: number;
+  consentConfirmed: boolean;
 }
 
 export interface DraftRequest {
@@ -200,6 +201,8 @@ export interface CompleteYouTubeResponse {
 export interface PlatformConnectionStatus {
   connected: boolean;
   displayName?: string;
+  requiresReconnect?: boolean;
+  message?: string;
 }
 
 export interface InstagramPublishResponse {
