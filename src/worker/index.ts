@@ -7,6 +7,7 @@ import type {
   CompleteYouTubeResponse,
   CreateJobResponse,
   DraftRequest,
+  EditScheduledPostRequest,
   InstagramPublishResponse,
   JobStateUpdateRequest,
   Platform,
@@ -42,6 +43,7 @@ import {
   jobKey,
   loadJob,
   markPlatformFailed,
+  normalizeOverallStatus,
   putJobWithRetry,
   setPlatformStatus,
 } from "./job-store";
@@ -53,6 +55,14 @@ import {
   youtubeConnectionStatus,
 } from "./oauth";
 import { getSystemStatus } from "./system-status";
+import {
+  cancelScheduledPost,
+  editScheduledPost,
+  getScheduledThumbnail,
+  listScheduledPosts,
+  replaceScheduledThumbnail,
+} from "./scheduled-posts";
+import { runScheduler } from "./scheduler";
 import {
   beginTikTokOAuth,
   disconnectTikTok,
@@ -88,6 +98,9 @@ export default {
       return json({ error: message } satisfies ApiError, 500);
     }
   },
+  async scheduled(controller: ScheduledController, env: Env, context: ExecutionContext): Promise<void> {
+    context.waitUntil(runScheduler(env, controller.scheduledTime));
+  },
 } satisfies ExportedHandler<Env>;
 
 async function route(request: Request, env: Env): Promise<Response> {
@@ -97,7 +110,7 @@ async function route(request: Request, env: Env): Promise<Response> {
     return json({
       ok: true,
       service: "social-uploader",
-      milestone: 3,
+      milestone: 4,
       storage: "temporary-r2-and-kv-metadata",
       storageCapBytes: R2_STORAGE_CAP_BYTES,
       cleanupFallbackDays: 7,
@@ -105,6 +118,13 @@ async function route(request: Request, env: Env): Promise<Response> {
   }
   if (url.pathname === "/api/system/status" && request.method === "GET") {
     return json(await getSystemStatus(env));
+  }
+  if (url.pathname === "/api/scheduled-posts" && request.method === "GET") {
+    return json({ posts: await listScheduledPosts(env) });
+  }
+  const scheduledThumbnailMatch = /^\/api\/scheduled-posts\/([^/]+)\/thumbnail$/u.exec(url.pathname);
+  if (scheduledThumbnailMatch && request.method === "GET") {
+    return getScheduledThumbnail(env, scheduledThumbnailMatch[1] ?? "");
   }
   if (url.pathname === "/api/oauth/youtube/start" && request.method === "GET") {
     return beginYouTubeOAuth(env);
@@ -179,6 +199,17 @@ async function route(request: Request, env: Env): Promise<Response> {
   if (jobMatch && request.method === "POST") {
     return updateJobState(request, env, jobMatch[1] ?? "");
   }
+  if (jobMatch && request.method === "PATCH") {
+    return updateScheduledJob(request, env, jobMatch[1] ?? "");
+  }
+  if (jobMatch && request.method === "DELETE") {
+    return deleteScheduledJob(env, jobMatch[1] ?? "");
+  }
+
+  const thumbnailReplaceMatch = /^\/api\/jobs\/([^/]+)\/thumbnail$/u.exec(url.pathname);
+  if (thumbnailReplaceMatch && request.method === "PUT") {
+    return replaceScheduledJobThumbnail(request, env, thumbnailReplaceMatch[1] ?? "");
+  }
 
   const completionMatch = /^\/api\/jobs\/([^/]+)\/youtube\/complete$/u.exec(url.pathname);
   if (completionMatch && request.method === "POST") {
@@ -224,7 +255,7 @@ async function createPresignedUpload(request: Request, env: Env): Promise<Respon
   const filesByKind = Object.fromEntries(
     input.files.map((file) => [file.kind, file]),
   ) as Record<AssetKind, UploadFileRequest>;
-  const objectKeys = input.files.map((file) => objectKeyFor(input.jobId, file));
+  const objectKeys = input.files.map((file) => objectKeyFor(input.jobId, input.retention, file));
   let capacity;
   try {
     capacity = await reserveUploadCapacity(env.UPLOADS, input, objectKeys);
@@ -247,12 +278,13 @@ async function createPresignedUpload(request: Request, env: Env): Promise<Respon
   });
 
   const [video, thumbnail] = await Promise.all([
-    signUpload(client, endpoint, env.R2_BUCKET_NAME, input.jobId, filesByKind.video, capacity.expiresIn),
+    signUpload(client, endpoint, env.R2_BUCKET_NAME, input.jobId, input.retention, filesByKind.video, capacity.expiresIn),
     signUpload(
       client,
       endpoint,
       env.R2_BUCKET_NAME,
       input.jobId,
+      input.retention,
       filesByKind.thumbnail,
       capacity.expiresIn,
     ),
@@ -273,10 +305,11 @@ async function signUpload(
   endpoint: string,
   bucketName: string,
   jobId: string,
+  retention: "staging" | "scheduled",
   file: UploadFileRequest,
   expiresIn: number,
 ): Promise<PresignedUpload> {
-  const objectKey = objectKeyFor(jobId, file);
+  const objectKey = objectKeyFor(jobId, retention, file);
   const objectUrl = `${endpoint}/${bucketName}/${objectKey}?X-Amz-Expires=${expiresIn}`;
   const signed = await client.sign(
     new Request(objectUrl, {
@@ -291,8 +324,12 @@ async function signUpload(
   return { uploadUrl: signed.url, objectKey, expiresIn };
 }
 
-function objectKeyFor(jobId: string, file: UploadFileRequest): string {
-  return `uploads/${jobId}/${file.kind}.${extensionFor(file.kind, file.contentType)}`;
+function objectKeyFor(
+  jobId: string,
+  retention: "staging" | "scheduled",
+  file: UploadFileRequest,
+): string {
+  return `${retention}/${jobId}/${file.kind}.${extensionFor(file.kind, file.contentType)}`;
 }
 
 async function createJob(request: Request, env: Env): Promise<Response> {
@@ -321,15 +358,15 @@ async function createJob(request: Request, env: Env): Promise<Response> {
       .filter(([, enabled]) => enabled)
       .map(([platform]) => [platform, platform === "youtube" ? "uploading" : "pending"]),
   ) as StoredJob["platformStatus"];
-  const job: StoredJob = {
+  const job: StoredJob = normalizeOverallStatus({
     ...input,
     title: input.title.trim(),
-    schemaVersion: 4,
+    schemaVersion: 5,
     status: "uploading",
     platformStatus,
     createdAt: now,
     updatedAt: now,
-  };
+  });
   await putJobWithRetry(env, job);
   await recordAppEvent(env, {
     level: "info",
@@ -350,6 +387,40 @@ async function getJob(env: Env, jobId: string): Promise<Response> {
   if (!UUID_PATTERN.test(jobId)) return json({ error: "Invalid job ID." } satisfies ApiError, 400);
   const job = await loadJob(env, jobId);
   return job ? json(job) : json({ error: "Job not found." } satisfies ApiError, 404);
+}
+
+async function updateScheduledJob(request: Request, env: Env, jobId: string): Promise<Response> {
+  if (!UUID_PATTERN.test(jobId)) return json({ error: "Invalid job ID." } satisfies ApiError, 400);
+  const body = (await readJson(request)) as EditScheduledPostRequest | null;
+  if (!body) return json({ error: "Invalid scheduled post update." } satisfies ApiError, 400);
+  try {
+    return json(await editScheduledPost(env, jobId, body));
+  } catch (error) {
+    return json({ error: errorMessage(error) } satisfies ApiError, 409);
+  }
+}
+
+async function deleteScheduledJob(env: Env, jobId: string): Promise<Response> {
+  if (!UUID_PATTERN.test(jobId)) return json({ error: "Invalid job ID." } satisfies ApiError, 400);
+  try {
+    await cancelScheduledPost(env, jobId);
+    return json({ cancelled: true });
+  } catch (error) {
+    return json({ error: errorMessage(error) } satisfies ApiError, 409);
+  }
+}
+
+async function replaceScheduledJobThumbnail(
+  request: Request,
+  env: Env,
+  jobId: string,
+): Promise<Response> {
+  if (!UUID_PATTERN.test(jobId)) return json({ error: "Invalid job ID." } satisfies ApiError, 400);
+  try {
+    return json(await replaceScheduledThumbnail(request, env, jobId));
+  } catch (error) {
+    return json({ error: errorMessage(error) } satisfies ApiError, 409);
+  }
 }
 
 async function updateJobState(request: Request, env: Env, jobId: string): Promise<Response> {
@@ -520,6 +591,9 @@ async function startInstagramPublish(env: Env, jobId: string): Promise<Response>
   const job = await loadJob(env, jobId);
   if (!job) return json({ error: "Job not found." } satisfies ApiError, 404);
   if (!job.platforms.instagram) return json({ error: "Instagram is not selected for this job." } satisfies ApiError, 409);
+  if (job.scheduledAt && new Date(job.scheduledAt).getTime() > Date.now()) {
+    return json({ error: "Instagram is scheduled and will be sent by the Worker at publish time." } satisfies ApiError, 409);
+  }
   if (job.instagramResult) return json(instagramResponse(job));
 
   try {
@@ -654,6 +728,9 @@ async function startTikTokPublish(env: Env, jobId: string): Promise<Response> {
   const job = await loadJob(env, jobId);
   if (!job) return json({ error: "Job not found." } satisfies ApiError, 404);
   if (!job.platforms.tiktok) return json({ error: "TikTok is not selected for this job." } satisfies ApiError, 409);
+  if (job.scheduledAt && new Date(job.scheduledAt).getTime() > Date.now()) {
+    return json({ error: "TikTok is scheduled and will be sent by Social Uploader at publish time." } satisfies ApiError, 409);
+  }
   if (job.tiktokResult) {
     return json({ error: "TikTok Direct Post is already initialized for this job." } satisfies ApiError, 409);
   }

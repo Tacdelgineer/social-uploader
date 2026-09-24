@@ -9,20 +9,25 @@ import { getTemporaryStorageMetrics } from "./capacity";
 import type { Env } from "./env";
 import { listAppEvents } from "./events";
 import { instagramConnectionStatus } from "./instagram-oauth";
+import { listAllJobs } from "./job-store";
 import { youtubeConnectionStatus } from "./oauth";
+import { getStorageBreakdown } from "./reconciliation";
+import { listSchedulerRuns } from "./scheduler";
 import { tiktokConnectionStatus } from "./tiktok-oauth";
 
-const JOB_PREFIX = "job:";
-
 export async function getSystemStatus(env: Env): Promise<SystemStatusResponse> {
-  const [storage, jobs, events, youtube, instagram, tiktok] = await Promise.all([
+  const allJobsPromise = listAllJobs(env);
+  const [storage, allJobs, events, youtube, instagram, tiktok, recentRuns] = await Promise.all([
     getTemporaryStorageMetrics(env.UPLOADS),
-    listRecentJobs(env),
+    allJobsPromise,
     listAppEvents(env, 50),
     youtubeConnectionStatus(env),
     instagramConnectionStatus(env),
     tiktokConnectionStatus(env),
+    listSchedulerRuns(env),
   ]);
+  const breakdown = await getStorageBreakdown(env, allJobs);
+  const pending = allJobs.filter(isPendingScheduledJob);
 
   return {
     generatedAt: new Date().toISOString(),
@@ -32,30 +37,21 @@ export async function getSystemStatus(env: Env): Promise<SystemStatusResponse> {
       instagram: instagram.connected,
       tiktok: tiktok.connected,
     },
-    jobs,
+    scheduling: {
+      pendingCount: pending.length,
+      nextPublishAt: pending.map((job) => job.scheduledAt!).sort()[0] ?? null,
+      ...breakdown,
+      recentRuns,
+    },
+    platformResults: platformResults(allJobs),
+    jobs: allJobs
+      .sort((left, right) => right.createdAt.localeCompare(left.createdAt))
+      .slice(0, 50)
+      .map(summarizeJob),
     recentErrors: events.filter((event) => event.level === "error").slice(0, 20),
     events,
     localWorker: { configured: false },
   };
-}
-
-async function listRecentJobs(env: Env): Promise<SystemJobSummary[]> {
-  const names: string[] = [];
-  let cursor: string | undefined;
-  do {
-    const page = await env.METADATA.list({ prefix: JOB_PREFIX, cursor, limit: 1000 });
-    names.push(...page.keys.map((item) => item.name));
-    cursor = page.list_complete ? undefined : page.cursor;
-  } while (cursor && names.length < 1000);
-
-  const stored = await Promise.all(
-    names.slice(0, 100).map((name) => env.METADATA.get<StoredJob>(name, "json")),
-  );
-  return stored
-    .filter((job): job is StoredJob => job !== null)
-    .sort((left, right) => right.createdAt.localeCompare(left.createdAt))
-    .slice(0, 50)
-    .map(summarizeJob);
 }
 
 function summarizeJob(job: StoredJob): SystemJobSummary {
@@ -81,4 +77,31 @@ function normalizeStatus(status: JobStatus): SystemJobSummary["status"] {
   if (status === "uploading_to_youtube") return "uploading";
   if (status === "scheduled_on_youtube") return "scheduled";
   return status;
+}
+
+function isPendingScheduledJob(job: StoredJob): boolean {
+  if (!job.scheduledAt || ["cancelled", "completed", "failed"].includes(job.status)) return false;
+  return (Object.entries(job.platforms) as Array<[Platform, boolean]>).some(
+    ([platform, enabled]) => enabled && ["pending", "uploading", "processing", "scheduled"].includes(job.platformStatus?.[platform] ?? "pending"),
+  );
+}
+
+function platformResults(
+  jobs: StoredJob[],
+): SystemStatusResponse["platformResults"] {
+  const result: SystemStatusResponse["platformResults"] = {
+    youtube: { succeeded: 0, failed: 0, pending: 0 },
+    instagram: { succeeded: 0, failed: 0, pending: 0 },
+    tiktok: { succeeded: 0, failed: 0, pending: 0 },
+  };
+  for (const job of jobs) {
+    for (const platform of ["youtube", "instagram", "tiktok"] as Platform[]) {
+      if (!job.platforms[platform]) continue;
+      const status = job.platformStatus?.[platform] ?? "pending";
+      if (["scheduled", "published"].includes(status)) result[platform].succeeded += 1;
+      else if (status === "failed") result[platform].failed += 1;
+      else if (status !== "cancelled") result[platform].pending += 1;
+    }
+  }
+  return result;
 }

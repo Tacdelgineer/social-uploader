@@ -13,7 +13,7 @@ import {
 } from "../shared/contracts";
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-const ASSET_KEY_PATTERN = /^uploads\/([0-9a-f-]{36})\/(video\.mp4|thumbnail\.(jpg|png|webp))$/i;
+const ASSET_KEY_PATTERN = /^(?:uploads|staging|scheduled)\/([0-9a-f-]{36})\/(video\.mp4|thumbnail(?:-[0-9a-f-]{36})?\.(jpg|png|webp))$/i;
 const TIMEZONE_PATTERN = /^[A-Za-z0-9_+\-/]{1,100}$/;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -30,8 +30,9 @@ export function extensionFor(kind: AssetKind, contentType: string): string | nul
 
 export function validatePresignRequest(value: unknown): PresignRequest | null {
   if (!isRecord(value)) return null;
-  const { jobId, files } = value;
+  const { jobId, retention, files } = value;
   if (typeof jobId !== "string" || !UUID_PATTERN.test(jobId)) return null;
+  if (retention !== "staging" && retention !== "scheduled") return null;
   if (!Array.isArray(files) || files.length !== 2) return null;
   const validatedFiles = files.map(validateUploadFile);
   if (validatedFiles.some((file) => file === null)) return null;
@@ -39,7 +40,7 @@ export function validatePresignRequest(value: unknown): PresignRequest | null {
   const kinds = new Set(safeFiles.map((file) => file.kind));
   if (!kinds.has("video") || !kinds.has("thumbnail")) return null;
 
-  return { jobId, files: safeFiles };
+  return { jobId, retention, files: safeFiles };
 }
 
 function validateUploadFile(value: unknown): UploadFileRequest | null {

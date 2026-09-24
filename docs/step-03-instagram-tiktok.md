@@ -1,5 +1,7 @@
 # Step 03 - Instagram Reels and TikTok Direct Post
 
+> Historical milestone note: Milestone 4 replaces the immediate-only Instagram/TikTok behavior and bucket-wide lifecycle described below. See `step-04-scheduled-posts.md` for the current design.
+
 ## Architecture
 
 Milestone 3 keeps the existing Cloudflare Worker, Workers KV, and private R2 bucket. It adds no server, database, queue, container, paid Cloudflare feature, or mini-PC process.
@@ -17,8 +19,8 @@ Milestone 3 keeps the existing Cloudflare Worker, Workers KV, and private R2 buc
 The deployed Worker requires these existing encrypted secrets:
 
 ```sh
-npx wrangler secret put META_APP_ID
-npx wrangler secret put META_APP_SECRET
+npx wrangler secret put INSTAGRAM_APP_ID
+npx wrangler secret put INSTAGRAM_APP_SECRET
 npx wrangler secret put TIKTOK_CLIENT_KEY
 npx wrangler secret put TIKTOK_CLIENT_SECRET
 ```

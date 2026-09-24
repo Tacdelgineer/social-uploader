@@ -20,9 +20,10 @@
         <div class="header-actions">
           <nav class="view-nav" aria-label="Dashboard sections">
             <button class="view-nav-button is-active" type="button" data-view-target="uploader-view">Uploader</button>
+            <button class="view-nav-button" type="button" data-view-target="scheduled-view">Scheduled posts</button>
             <button class="view-nav-button" type="button" data-view-target="status-view">System status</button>
           </nav>
-          <span class="milestone-pill">Multi-platform - M3</span>
+          <span class="milestone-pill">Scheduling - M4</span>
         </div>
       </header>
 
@@ -125,8 +126,8 @@
 
                 <label class="field schedule-field">
                   <span>Publish date and time</span>
-                  <input id="scheduled-at" name="scheduledAt" type="datetime-local" required />
-                  <small id="timezone-label">Schedule applies to YouTube only</small>
+                  <input id="scheduled-at" name="scheduledAt" type="datetime-local" />
+                  <small id="timezone-label">Choose a future time, or leave blank to publish Instagram/TikTok now</small>
                 </label>
               </div>
             </section>
@@ -138,6 +139,10 @@
                 <div>
                   <p class="step-label">03 - Destination</p>
                   <h2 id="destinations-heading">Choose platform</h2>
+                </div>
+                <div class="selection-actions">
+                  <button id="select-all-platforms" class="text-button" type="button">Select all</button>
+                  <button id="select-no-platforms" class="text-button" type="button">Select none</button>
                 </div>
               </div>
 
@@ -197,7 +202,7 @@
                       <input id="instagram-share-to-feed" type="checkbox" checked />
                       <span>Also share Reel to feed</span>
                     </label>
-                    <p class="settings-note">Publishes immediately. Uses the shared caption and JPEG thumbnail as the Reel cover.</p>
+                    <p class="settings-note">Future posts are sent by Social Uploader at publish time. Uses the shared caption and JPEG cover.</p>
                   </div>
                 </details>
 
@@ -234,7 +239,7 @@
                       <input id="tiktok-cover-timestamp" type="number" min="0" step="1" value="0" />
                     </label>
                     <p id="tiktok-creator-info" class="settings-note">Connect TikTok to load creator posting limits.</p>
-                    <p class="settings-note restriction-note">Publishes immediately through Direct Post with FILE_UPLOAD. Unaudited posts are forced to SELF_ONLY.</p>
+                    <p class="settings-note restriction-note">Scheduled by Social Uploader; TikTok receives it at publish time. Direct Post uses FILE_UPLOAD and is forced to SELF_ONLY while unaudited.</p>
                   </div>
                 </details>
               </div>
@@ -266,6 +271,23 @@
             </section>
           </aside>
         </form>
+      </main>
+
+      <main id="scheduled-view" class="status-view" data-view hidden>
+        <section class="status-hero">
+          <div>
+            <p class="eyebrow">Before publication</p>
+            <h1>Scheduled posts</h1>
+            <p>Edit pending metadata, time, destinations, supported settings, and covers—or cancel the post.</p>
+          </div>
+          <div class="status-refresh-wrap">
+            <button id="scheduled-refresh" class="connect-button" type="button">Refresh</button>
+            <small>Instagram and TikTok are dispatched by the Worker at publish time.</small>
+          </div>
+        </section>
+        <section id="scheduled-posts-list" class="scheduled-posts-list" aria-live="polite">
+          <article class="panel empty-scheduled">Load scheduled posts to view pending work.</article>
+        </section>
       </main>
 
       <main id="status-view" class="status-view" data-view hidden>
@@ -303,10 +325,20 @@
           </article>
 
           <article class="panel status-card local-worker-card">
-            <p class="step-label">Mini-PC worker</p>
-            <strong>Not configured</strong>
-            <p>Status and local disk usage will appear here when the local worker is built in a later milestone.</p>
+            <p class="step-label">Scheduler</p>
+            <div class="metric-row"><strong id="scheduled-count">—</strong><span>pending</span></div>
+            <dl class="metric-details">
+              <div><dt>Next publish</dt><dd id="next-scheduled-publish">—</dd></div>
+              <div><dt>Pending media</dt><dd id="pending-media">—</dd></div>
+              <div><dt>Orphan / staging</dt><dd id="orphan-media">—</dd></div>
+            </dl>
           </article>
+        </section>
+
+        <section class="status-card-grid" aria-label="Platform outcomes">
+          <article class="panel status-card"><p class="step-label">YouTube outcomes</p><strong id="youtube-results">—</strong></article>
+          <article class="panel status-card"><p class="step-label">Instagram outcomes</p><strong id="instagram-results">—</strong></article>
+          <article class="panel status-card"><p class="step-label">TikTok outcomes</p><strong id="tiktok-results">—</strong></article>
         </section>
 
         <section class="panel status-section">
@@ -323,6 +355,10 @@
         </section>
 
         <div class="status-log-grid">
+          <section class="panel status-section">
+            <div class="section-heading compact"><div><p class="step-label">Cron history</p><h2>Scheduler runs</h2></div></div>
+            <ol id="scheduler-runs-list" class="event-list"><li class="empty-event">No scheduler runs loaded.</li></ol>
+          </section>
           <section class="panel status-section">
             <div class="section-heading compact"><div><p class="step-label">Attention</p><h2>Recent errors</h2></div></div>
             <ol id="errors-list" class="event-list"><li class="empty-event">No errors loaded.</li></ol>

@@ -26,6 +26,9 @@
     "R2_ACCOUNT_ID": "b562069cd100d1d1db37a706344d214f",
     "APP_BASE_URL": "https://social-uploader.nodatlaspour.workers.dev"
   },
+  "triggers": {
+    "crons": ["*/5 * * * *"]
+  },
   "observability": {
     "enabled": true
   }

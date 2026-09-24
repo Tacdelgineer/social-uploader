@@ -9,6 +9,20 @@ export async function loadJob(env: Env, jobId: string): Promise<StoredJob | null
   return env.METADATA.get<StoredJob>(jobKey(jobId), "json");
 }
 
+export async function listAllJobs(env: Env, limit = 1000): Promise<StoredJob[]> {
+  const keys: string[] = [];
+  let cursor: string | undefined;
+  do {
+    const page = await env.METADATA.list({ prefix: "job:", cursor, limit: 1000 });
+    keys.push(...page.keys.map((item) => item.name));
+    cursor = page.list_complete || keys.length >= limit ? undefined : page.cursor;
+  } while (cursor);
+  const jobs = await Promise.all(
+    keys.slice(0, limit).map((key) => env.METADATA.get<StoredJob>(key, "json")),
+  );
+  return jobs.filter((job): job is StoredJob => job !== null);
+}
+
 export async function putJobWithRetry(env: Env, job: StoredJob): Promise<void> {
   let lastError: unknown;
   for (let attempt = 0; attempt < 3; attempt += 1) {
@@ -59,6 +73,7 @@ export function setPlatformStatus(
 }
 
 export function normalizeOverallStatus(job: StoredJob): StoredJob {
+  if (job.status === "cancelled") return job;
   const selected = (Object.entries(job.platforms) as Array<[Platform, boolean]>)
     .filter(([, enabled]) => enabled)
     .map(([platform]) => platform);
@@ -66,10 +81,19 @@ export function normalizeOverallStatus(job: StoredJob): StoredJob {
   const successes = states.filter((state) => state === "scheduled" || state === "published").length;
   const failures = states.filter((state) => state === "failed").length;
   let status: StoredJob["status"];
-  if (successes === states.length) status = "completed";
-  else if (successes + failures === states.length) status = successes > 0 ? "partial" : "failed";
-  else if (states.some((state) => state === "uploading")) status = "uploading";
-  else status = "processing";
+  if (states.some((state) => state === "uploading")) status = "uploading";
+  else if (states.some((state) => state === "processing")) status = "processing";
+  else if (
+    states.some((state) => state === "pending") &&
+    job.scheduledAt &&
+    new Date(job.scheduledAt).getTime() > Date.now()
+  ) status = "scheduled";
+  else if (states.some((state) => state === "pending")) status = "processing";
+  else if (failures > 0 && successes > 0) status = "partial";
+  else if (failures === states.length) status = "failed";
+  else if (successes === states.length) {
+    status = states.some((state) => state === "scheduled") ? "scheduled" : "completed";
+  } else status = "processing";
   return { ...job, status };
 }
 
@@ -107,9 +131,17 @@ export async function cleanupReleasedMedia(
 }
 
 function sourceReleased(job: StoredJob, platform: Platform): boolean {
+  if (["failed", "cancelled"].includes(job.platformStatus?.[platform] ?? "")) return true;
   if (platform === "youtube") return Boolean(job.youtubeResult);
   if (platform === "instagram") return job.instagramResult?.mediaTransferred === true;
   return job.tiktokResult?.uploadCompleted === true;
+}
+
+export function jobRequiresSource(job: StoredJob): boolean {
+  if (job.mediaDeleted || job.status === "cancelled") return false;
+  return (Object.entries(job.platforms) as Array<[Platform, boolean]>).some(
+    ([platform, enabled]) => enabled && !sourceReleased(job, platform),
+  );
 }
 
 function wait(milliseconds: number): Promise<void> {

@@ -26,6 +26,7 @@ export type PlatformJobStatus =
   | "processing"
   | "scheduled"
   | "published"
+  | "cancelled"
   | "failed";
 
 export interface UploadFileRequest {
@@ -37,6 +38,7 @@ export interface UploadFileRequest {
 
 export interface PresignRequest {
   jobId: string;
+  retention: "staging" | "scheduled";
   files: UploadFileRequest[];
 }
 
@@ -97,7 +99,7 @@ export interface DraftRequest {
 }
 
 export interface StoredJob extends DraftRequest {
-  schemaVersion: 2 | 3 | 4;
+  schemaVersion: 2 | 3 | 4 | 5;
   status: JobStatus;
   createdAt: string;
   updatedAt: string;
@@ -132,7 +134,13 @@ export interface StoredJob extends DraftRequest {
     postIds: string[];
     acceptedAt?: string;
     warnings?: string[];
+    encryptedUploadUrl?: string;
+    chunkSize?: number;
+    totalChunkCount?: number;
   };
+  schedulerAttempts?: Partial<Record<Platform, number>>;
+  lastSchedulerAttemptAt?: string;
+  cancelledAt?: string;
 }
 
 export interface CreateJobResponse {
@@ -142,6 +150,37 @@ export interface CreateJobResponse {
     uploadUrl: string;
     accessToken: string;
   };
+}
+
+export interface ScheduledPostSummary {
+  id: string;
+  title: string;
+  description: string;
+  scheduledAt: string;
+  timezone: string;
+  platforms: Record<Platform, boolean>;
+  platformStatus: Partial<Record<Platform, PlatformJobStatus>>;
+  fileSizeBytes: number;
+  thumbnailUrl: string;
+  youtube: YouTubeSettings;
+  instagram: InstagramSettings;
+  tiktok: TikTokSettings;
+  canEdit: boolean;
+  sourceMediaAvailable: boolean;
+}
+
+export interface ScheduledPostsResponse {
+  posts: ScheduledPostSummary[];
+}
+
+export interface EditScheduledPostRequest {
+  title: string;
+  description: string;
+  scheduledAt: string;
+  platforms: Record<Platform, boolean>;
+  youtube: YouTubeSettings;
+  instagram: InstagramSettings;
+  tiktok: TikTokSettings;
 }
 
 export interface CompleteYouTubeRequest {
@@ -211,7 +250,7 @@ export interface AppEvent {
   id: string;
   timestamp: string;
   level: "info" | "warning" | "error";
-  category: "upload" | "youtube" | "instagram" | "tiktok" | "storage" | "oauth" | "system";
+  category: "upload" | "youtube" | "instagram" | "tiktok" | "storage" | "cleanup" | "scheduler" | "oauth" | "system";
   message: string;
   platform?: Platform;
   jobId?: string;
@@ -244,12 +283,32 @@ export interface SystemStatusResponse {
     } | null;
   };
   connections: Record<Platform, boolean>;
+  scheduling: {
+    pendingCount: number;
+    nextPublishAt: string | null;
+    pendingMediaBytes: number;
+    pendingMediaObjectCount: number;
+    orphanStagingBytes: number;
+    orphanStagingObjectCount: number;
+    recentRuns: SchedulerRun[];
+  };
+  platformResults: Record<Platform, { succeeded: number; failed: number; pending: number }>;
   jobs: SystemJobSummary[];
   recentErrors: AppEvent[];
   events: AppEvent[];
   localWorker: {
     configured: false;
   };
+}
+
+export interface SchedulerRun {
+  startedAt: string;
+  finishedAt: string;
+  dueJobs: number;
+  processedPlatforms: number;
+  succeeded: number;
+  failed: number;
+  deletedObjects: number;
 }
 
 export interface YouTubeConnectionStatus {

@@ -9,8 +9,8 @@ export interface Env {
   APP_BASE_URL: string;
   YOUTUBE_CLIENT_ID: string;
   YOUTUBE_CLIENT_SECRET: string;
-  META_APP_ID: string;
-  META_APP_SECRET: string;
+  INSTAGRAM_APP_ID: string;
+  INSTAGRAM_APP_SECRET: string;
   TIKTOK_CLIENT_KEY: string;
   TIKTOK_CLIENT_SECRET: string;
   OAUTH_ENCRYPTION_KEY: string;

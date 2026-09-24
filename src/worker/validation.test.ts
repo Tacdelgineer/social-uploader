@@ -10,6 +10,7 @@ describe("upload validation", () => {
     expect(
       validatePresignRequest({
         jobId: id,
+        retention: "staging",
         files: [
           { kind: "video", fileName: "short.mp4", contentType: "video/mp4", size: 123 },
           { kind: "thumbnail", fileName: "cover.png", contentType: "image/png", size: 45 },
@@ -22,6 +23,7 @@ describe("upload validation", () => {
     expect(
       validatePresignRequest({
         jobId: id,
+        retention: "staging",
         files: [
           { kind: "video", fileName: "short.mov", contentType: "video/quicktime", size: 123 },
           { kind: "thumbnail", fileName: "cover.png", contentType: "image/png", size: 45 },
@@ -31,6 +33,7 @@ describe("upload validation", () => {
     expect(
       validatePresignRequest({
         jobId: id,
+        retention: "staging",
         files: [
           { kind: "video", fileName: "short.mp4", contentType: "video/mp4", size: 123 },
           {
@@ -48,9 +51,23 @@ describe("upload validation", () => {
     expect(
       validatePresignRequest({
         jobId: id,
+        retention: "staging",
         files: [
           { kind: "video", fileName: "one.mp4", contentType: "video/mp4", size: 123 },
           { kind: "video", fileName: "two.mp4", contentType: "video/mp4", size: 456 },
+        ],
+      }),
+    ).toBeNull();
+  });
+
+  it("requires an explicit staging or scheduled retention class", () => {
+    expect(
+      validatePresignRequest({
+        jobId: id,
+        retention: "archive",
+        files: [
+          { kind: "video", fileName: "one.mp4", contentType: "video/mp4", size: 123 },
+          { kind: "thumbnail", fileName: "cover.jpg", contentType: "image/jpeg", size: 45 },
         ],
       }),
     ).toBeNull();
@@ -137,6 +154,26 @@ describe("draft validation", () => {
               originalName: "cover.jpg",
               contentType: "image/jpeg",
               size: 45,
+            },
+          },
+        },
+        new Date("2026-09-23T00:00:00.000Z"),
+      ),
+    ).not.toBeNull();
+  });
+
+  it("accepts scheduled-media object keys", () => {
+    expect(
+      validateDraftRequest(
+        {
+          ...validDraft,
+          platforms: { youtube: false, instagram: true, tiktok: false },
+          assets: {
+            video: { ...validDraft.assets.video, key: `scheduled/${id}/video.mp4` },
+            thumbnail: {
+              ...validDraft.assets.thumbnail,
+              key: `scheduled/${id}/thumbnail.jpg`,
+              contentType: "image/jpeg",
             },
           },
         },

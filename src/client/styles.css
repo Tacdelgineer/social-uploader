@@ -1103,6 +1103,129 @@ summary:focus-visible {
   font-size: 11px;
 }
 
+.selection-actions,
+.scheduled-card-heading,
+.scheduled-meta,
+.scheduled-platforms {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.selection-actions .text-button {
+  font-size: 10px;
+}
+
+.scheduled-posts-list {
+  display: grid;
+  gap: 16px;
+  padding-bottom: 64px;
+}
+
+.empty-scheduled {
+  color: #758078;
+  text-align: center;
+}
+
+.scheduled-card {
+  display: grid;
+  grid-template-columns: 180px minmax(0, 1fr);
+  gap: 22px;
+}
+
+.scheduled-thumbnail {
+  width: 180px;
+  aspect-ratio: 16 / 9;
+  border-radius: 12px;
+  object-fit: cover;
+  background: #edf0ed;
+}
+
+.scheduled-card-content {
+  min-width: 0;
+}
+
+.scheduled-card-heading {
+  justify-content: space-between;
+  align-items: flex-start;
+}
+
+.scheduled-card-heading h2 {
+  margin: 0 0 5px;
+  font-size: 18px;
+}
+
+.scheduled-card-heading p {
+  margin: 0;
+  max-width: 640px;
+  color: #68726b;
+  font-size: 11px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.scheduled-meta {
+  margin-top: 14px;
+  color: #6f7972;
+  font-size: 10px;
+}
+
+.destructive-button {
+  color: #a33b3b;
+}
+
+.scheduled-edit-form {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+  margin-top: 20px;
+  border-top: 1px solid #e2e7e3;
+  padding-top: 18px;
+}
+
+.scheduled-edit-form textarea,
+.scheduled-edit-form input[type="text"],
+.scheduled-edit-form input[type="datetime-local"],
+.scheduled-edit-form input[type="number"],
+.scheduled-edit-form input[type="file"] {
+  width: 100%;
+  box-sizing: border-box;
+  border: 1px solid #d8ded9;
+  border-radius: 9px;
+  background: #fbfcfb;
+  padding: 10px;
+  color: #26302a;
+  font: inherit;
+}
+
+.scheduled-platforms {
+  grid-column: 1 / -1;
+  border: 0;
+  padding: 0;
+}
+
+.scheduled-platforms legend {
+  width: 100%;
+  margin-bottom: 8px;
+  color: #667068;
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.scheduled-edit-form .settings-note,
+.scheduled-edit-form .compact-button {
+  grid-column: 1 / -1;
+}
+
+.compact-button {
+  width: fit-content;
+  padding: 11px 18px;
+}
+
 .toast {
   position: fixed;
   z-index: 10;
@@ -1216,6 +1339,15 @@ summary:focus-visible {
   .status-card-grid,
   .status-log-grid {
     grid-template-columns: 1fr;
+  }
+
+  .scheduled-card,
+  .scheduled-edit-form {
+    grid-template-columns: 1fr;
+  }
+
+  .scheduled-thumbnail {
+    width: 100%;
   }
 
   .storage-card {

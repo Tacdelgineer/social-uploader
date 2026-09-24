@@ -10,11 +10,14 @@ import {
   type CompleteYouTubeResponse,
   type CreateJobResponse,
   type DraftRequest,
+  type EditScheduledPostRequest,
   type InstagramPublishResponse,
   type Platform,
   type PlatformConnectionStatus,
   type PresignRequest,
   type PresignResponse,
+  type ScheduledPostSummary,
+  type ScheduledPostsResponse,
   type StoredJob,
   type SystemStatusResponse,
   type TikTokCreatorInfo,
@@ -75,6 +78,13 @@ updateScheduleRequirement();
 void refreshConnectionStatuses();
 showOAuthResult();
 
+requiredElement<HTMLButtonElement>("select-all-platforms").addEventListener("click", () => {
+  setAllPlatforms(true);
+});
+requiredElement<HTMLButtonElement>("select-no-platforms").addEventListener("click", () => {
+  setAllPlatforms(false);
+});
+
 titleInput.addEventListener("input", () => updateCount("title-count", titleInput.value.length));
 descriptionInput.addEventListener("input", () =>
   updateCount("description-count", descriptionInput.value.length),
@@ -120,6 +130,8 @@ requiredElement<HTMLInputElement>("tiktok-enabled").addEventListener("change", (
 });
 
 requiredElement<HTMLInputElement>("youtube-enabled").addEventListener("change", updateScheduleRequirement);
+requiredElement<HTMLInputElement>("instagram-enabled").addEventListener("change", updateScheduleRequirement);
+requiredElement<HTMLInputElement>("tiktok-enabled").addEventListener("change", updateScheduleRequirement);
 
 document.querySelectorAll<HTMLInputElement>(".toggle-wrap input").forEach((toggle) => {
   toggle.addEventListener("click", (event) => event.stopPropagation());
@@ -134,6 +146,9 @@ cancelButton.addEventListener("click", () => {
 
 requiredElement<HTMLButtonElement>("status-refresh").addEventListener("click", () => {
   void refreshSystemStatus();
+});
+requiredElement<HTMLButtonElement>("scheduled-refresh").addEventListener("click", () => {
+  void refreshScheduledPosts();
 });
 
 form.addEventListener("submit", async (event) => {
@@ -151,7 +166,7 @@ form.addEventListener("submit", async (event) => {
 
   try {
     setProgress("uploading", "Reserving capped temporary storage...", 3);
-    const reservation = await requestPresign(jobId, videoFile!, thumbnailFile!);
+    const reservation = await requestPresign(jobId, videoFile!, thumbnailFile!, selected);
     throwIfCancelled();
     const { video: videoUpload, thumbnail: thumbnailUpload } = reservation.uploads;
 
@@ -187,7 +202,8 @@ form.addEventListener("submit", async (event) => {
         await reportPlatformFailure(jobId, "youtube", errorMessage(error));
       }
     }
-    if (selected.includes("instagram")) {
+    const publishImmediately = !job.scheduledAt || new Date(job.scheduledAt).getTime() <= Date.now();
+    if (selected.includes("instagram") && publishImmediately) {
       try {
         await runInstagramPublish(jobId);
       } catch (error) {
@@ -196,7 +212,7 @@ form.addEventListener("submit", async (event) => {
         await reportPlatformFailure(jobId, "instagram", errorMessage(error));
       }
     }
-    if (selected.includes("tiktok")) {
+    if (selected.includes("tiktok") && publishImmediately) {
       try {
         await runTikTokPublish(jobId);
       } catch (error) {
@@ -241,6 +257,7 @@ function setupViewNavigation(): void {
         item.classList.toggle("is-active", item === button);
       });
       if (target === "status-view") void refreshSystemStatus();
+      if (target === "scheduled-view") void refreshScheduledPosts();
     });
   });
 }
@@ -439,9 +456,21 @@ function buildJob(jobId: string, videoKey: string, thumbnailKey: string): DraftR
   };
 }
 
-async function requestPresign(jobId: string, video: File, thumbnail: File): Promise<PresignResponse> {
+async function requestPresign(
+  jobId: string,
+  video: File,
+  thumbnail: File,
+  platforms: Platform[],
+): Promise<PresignResponse> {
+  const publishAt = scheduledAtInput.value ? new Date(scheduledAtInput.value) : null;
+  const retention =
+    publishAt && publishAt.getTime() > Date.now() &&
+    platforms.some((platform) => platform === "instagram" || platform === "tiktok")
+      ? "scheduled"
+      : "staging";
   const payload: PresignRequest = {
     jobId,
+    retention,
     files: [
       { kind: "video", fileName: video.name, contentType: video.type, size: video.size },
       { kind: "thumbnail", fileName: thumbnail.name, contentType: thumbnail.type, size: thumbnail.size },
@@ -688,9 +717,13 @@ function showJobResult(job: StoredJob, operationErrors: string[]): void {
   const stillProcessing = Object.values(job.platformStatus ?? {}).some(
     (status) => status === "uploading" || status === "processing" || status === "pending",
   );
-  const state: UploadState = stillProcessing ? "processing" : succeeded && job.status !== "partial" ? "scheduled" : "failed";
-  const label = stillProcessing
-    ? "Providers accepted the transfer; processing continues"
+  const pendingSchedule = Boolean(job.scheduledAt) && new Date(job.scheduledAt!).getTime() > Date.now() &&
+    Object.values(job.platformStatus ?? {}).some((status) => status === "pending" || status === "scheduled");
+  const state: UploadState = pendingSchedule ? "scheduled" : stillProcessing ? "processing" : succeeded && job.status !== "partial" ? "scheduled" : "failed";
+  const label = pendingSchedule
+    ? `Post scheduled for ${formatDate(job.scheduledAt!)}`
+    : stillProcessing
+      ? "Providers accepted the transfer; processing continues"
     : job.status === "completed"
       ? "All selected platforms accepted the post"
       : succeeded
@@ -711,6 +744,8 @@ function showJobResult(job: StoredJob, operationErrors: string[]): void {
       row.textContent = job.tiktokResult.status === "PUBLISH_COMPLETE"
         ? `TikTok published ${job.tiktokResult.publishId} as SELF_ONLY`
         : `TikTok ${job.tiktokResult.publishId}: ${humanizeStatus(job.tiktokResult.status)}`;
+    } else if (pendingSchedule && status === "pending") {
+      row.textContent = `${capitalize(platform)}: Social Uploader will send it at publish time`;
     } else {
       row.textContent = `${capitalize(platform)}: ${humanizeStatus(status)}`;
     }
@@ -719,7 +754,9 @@ function showJobResult(job: StoredJob, operationErrors: string[]): void {
 
   requiredElement<HTMLElement>("result-cleanup").textContent = job.mediaDeleted
     ? "Temporary video and thumbnail deleted"
-    : "Temporary media retained; 7-day cleanup fallback remains active";
+    : pendingSchedule
+      ? "Scheduled media retained until every selected platform is done"
+      : "Temporary media retained; 7-day staging cleanup remains active";
   const warnings = [
     ...(job.youtubeResult?.warnings ?? []),
     ...(job.instagramResult?.warnings ?? []),
@@ -823,6 +860,274 @@ function configureTikTokInteraction(id: string, providerDisabled: boolean): void
   if (providerDisabled) input.checked = false;
 }
 
+async function refreshScheduledPosts(): Promise<void> {
+  const refresh = requiredElement<HTMLButtonElement>("scheduled-refresh");
+  refresh.disabled = true;
+  refresh.textContent = "Refreshing...";
+  try {
+    const response = await apiRequest<ScheduledPostsResponse>("/api/scheduled-posts");
+    renderScheduledPosts(response.posts);
+  } catch (error) {
+    showToast(errorMessage(error), true);
+  } finally {
+    refresh.disabled = false;
+    refresh.textContent = "Refresh";
+  }
+}
+
+function renderScheduledPosts(posts: ScheduledPostSummary[]): void {
+  const list = requiredElement<HTMLElement>("scheduled-posts-list");
+  list.replaceChildren();
+  if (posts.length === 0) {
+    const empty = document.createElement("article");
+    empty.className = "panel empty-scheduled";
+    empty.textContent = "No pending scheduled posts.";
+    list.append(empty);
+    return;
+  }
+  for (const post of posts) list.append(createScheduledPostCard(post));
+}
+
+function createScheduledPostCard(post: ScheduledPostSummary): HTMLElement {
+  const card = document.createElement("article");
+  card.className = "panel scheduled-card";
+
+  const image = document.createElement("img");
+  image.className = "scheduled-thumbnail";
+  image.src = post.thumbnailUrl;
+  image.alt = "";
+
+  const content = document.createElement("div");
+  content.className = "scheduled-card-content";
+  const heading = document.createElement("div");
+  heading.className = "scheduled-card-heading";
+  const text = document.createElement("div");
+  const title = document.createElement("h2");
+  title.textContent = post.title;
+  const caption = document.createElement("p");
+  caption.textContent = post.description || "No caption";
+  text.append(title, caption);
+  const actions = document.createElement("div");
+  actions.className = "connection-actions";
+  const edit = document.createElement("button");
+  edit.type = "button";
+  edit.className = "connect-button";
+  edit.textContent = "Edit";
+  const cancel = document.createElement("button");
+  cancel.type = "button";
+  cancel.className = "text-button destructive-button";
+  cancel.textContent = "Cancel / delete";
+  actions.append(edit, cancel);
+  heading.append(text, actions);
+
+  const meta = document.createElement("div");
+  meta.className = "scheduled-meta";
+  const platforms = selectedPlatformsFromSummary(post);
+  for (const platform of platforms) {
+    const badge = document.createElement("span");
+    badge.className = "job-state";
+    badge.textContent = `${capitalize(platform)} · ${humanizeStatus(post.platformStatus[platform] ?? "pending")}`;
+    meta.append(badge);
+  }
+  const schedule = document.createElement("span");
+  schedule.textContent = formatDate(post.scheduledAt);
+  const size = document.createElement("span");
+  size.textContent = formatBytes(post.fileSizeBytes);
+  meta.append(schedule, size);
+
+  const editForm = createScheduledEditForm(post);
+  editForm.hidden = true;
+  edit.addEventListener("click", () => {
+    editForm.hidden = !editForm.hidden;
+    edit.textContent = editForm.hidden ? "Edit" : "Close edit";
+  });
+  cancel.addEventListener("click", async () => {
+    if (!window.confirm(`Cancel “${post.title}” and delete its pending media? This cannot be undone.`)) return;
+    cancel.disabled = true;
+    try {
+      await apiRequest(`/api/jobs/${encodeURIComponent(post.id)}`, { method: "DELETE" });
+      showToast("Scheduled post cancelled and temporary media removed.");
+      await Promise.all([refreshScheduledPosts(), refreshSystemStatus()]);
+    } catch (error) {
+      showToast(errorMessage(error), true);
+      cancel.disabled = false;
+    }
+  });
+
+  content.append(heading, meta, editForm);
+  card.append(image, content);
+  return card;
+}
+
+function createScheduledEditForm(post: ScheduledPostSummary): HTMLFormElement {
+  const editForm = document.createElement("form");
+  editForm.className = "scheduled-edit-form";
+
+  const title = editTextInput("Title", post.title, 100);
+  const description = document.createElement("textarea");
+  description.value = post.description;
+  description.maxLength = 2200;
+  description.rows = 4;
+  const descriptionField = fieldWithControl("Caption / description", description);
+  const schedule = editTextInput("Publish date and time", toLocalDateTime(post.scheduledAt));
+  schedule.input.type = "datetime-local";
+  schedule.input.required = true;
+  schedule.input.min = scheduledAtInput.min;
+
+  const platformGroup = document.createElement("fieldset");
+  platformGroup.className = "scheduled-platforms";
+  const legend = document.createElement("legend");
+  legend.textContent = "Destinations";
+  platformGroup.append(legend);
+  const platformInputs = {} as Record<Platform, HTMLInputElement>;
+  for (const platform of ["youtube", "instagram", "tiktok"] as Platform[]) {
+    const checkbox = document.createElement("input");
+    checkbox.type = "checkbox";
+    checkbox.checked = post.platforms[platform];
+    checkbox.disabled = !post.platforms[platform] && !post.sourceMediaAvailable;
+    platformInputs[platform] = checkbox;
+    const label = document.createElement("label");
+    label.className = "check-field";
+    const copy = document.createElement("span");
+    copy.textContent = capitalize(platform);
+    label.append(checkbox, copy);
+    platformGroup.append(label);
+  }
+
+  const madeForKids = checkboxControl("YouTube: made for kids", post.youtube.madeForKids);
+  const shareToFeed = checkboxControl("Instagram: also share to feed", post.instagram.shareToFeed);
+  const comments = checkboxControl("TikTok: allow comments", post.tiktok.allowComments);
+  const duet = checkboxControl("TikTok: allow Duet", post.tiktok.allowDuet);
+  const stitch = checkboxControl("TikTok: allow Stitch", post.tiktok.allowStitch);
+  const cover = editTextInput("TikTok cover frame (ms)", String(post.tiktok.coverTimestampMs));
+  cover.input.type = "number";
+  cover.input.min = "0";
+  cover.input.step = "1";
+
+  const thumbnail = document.createElement("input");
+  thumbnail.type = "file";
+  thumbnail.accept = "image/jpeg,image/png,image/webp,.jpg,.jpeg,.png,.webp";
+  const thumbnailField = fieldWithControl("Replacement thumbnail / cover (optional)", thumbnail);
+  const note = document.createElement("p");
+  note.className = "settings-note";
+  note.textContent = post.sourceMediaAvailable
+    ? "YouTube changes are synchronized now. Instagram/TikTok changes remain pending until dispatch."
+    : "The source video was already released; existing destinations can be edited, but another platform cannot be added.";
+  const save = document.createElement("button");
+  save.type = "submit";
+  save.className = "primary-button compact-button";
+  save.textContent = "Save changes";
+
+  editForm.append(
+    title.field,
+    descriptionField,
+    schedule.field,
+    platformGroup,
+    madeForKids.label,
+    shareToFeed.label,
+    comments.label,
+    duet.label,
+    stitch.label,
+    cover.field,
+    thumbnailField,
+    note,
+    save,
+  );
+
+  editForm.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const selected = (["youtube", "instagram", "tiktok"] as Platform[]).filter(
+      (platform) => platformInputs[platform].checked,
+    );
+    if (selected.length === 0) {
+      showToast("Keep at least one destination, or cancel the post.", true);
+      return;
+    }
+    save.disabled = true;
+    try {
+      const replacement = thumbnail.files?.[0];
+      if (replacement) await uploadScheduledThumbnail(post.id, replacement);
+      const input: EditScheduledPostRequest = {
+        title: title.input.value.trim(),
+        description: description.value,
+        scheduledAt: new Date(schedule.input.value).toISOString(),
+        platforms: {
+          youtube: platformInputs.youtube.checked,
+          instagram: platformInputs.instagram.checked,
+          tiktok: platformInputs.tiktok.checked,
+        },
+        youtube: { visibility: "public", madeForKids: madeForKids.input.checked },
+        instagram: { shareToFeed: shareToFeed.input.checked },
+        tiktok: {
+          privacy: "SELF_ONLY",
+          allowComments: comments.input.checked,
+          allowDuet: duet.input.checked,
+          allowStitch: stitch.input.checked,
+          coverTimestampMs: Number(cover.input.value),
+        },
+      };
+      await apiRequest(`/api/jobs/${encodeURIComponent(post.id)}`, {
+        method: "PATCH",
+        body: JSON.stringify(input),
+      });
+      showToast("Scheduled post updated.");
+      await Promise.all([refreshScheduledPosts(), refreshSystemStatus()]);
+    } catch (error) {
+      showToast(errorMessage(error), true);
+      save.disabled = false;
+    }
+  });
+  return editForm;
+}
+
+async function uploadScheduledThumbnail(jobId: string, file: File): Promise<void> {
+  const response = await fetch(`/api/jobs/${encodeURIComponent(jobId)}/thumbnail`, {
+    method: "PUT",
+    headers: { "content-type": file.type, "x-file-name": file.name },
+    body: file,
+  });
+  if (!response.ok) {
+    const payload = (await response.json().catch(() => null)) as ApiError | null;
+    throw new Error(payload?.error ?? `Thumbnail update failed (HTTP ${response.status}).`);
+  }
+}
+
+function editTextInput(labelText: string, value: string, maxLength?: number): { field: HTMLLabelElement; input: HTMLInputElement } {
+  const input = document.createElement("input");
+  input.type = "text";
+  input.value = value;
+  input.required = true;
+  if (maxLength) input.maxLength = maxLength;
+  return { field: fieldWithControl(labelText, input), input };
+}
+
+function fieldWithControl(labelText: string, control: HTMLElement): HTMLLabelElement {
+  const field = document.createElement("label");
+  field.className = "mini-field";
+  const label = document.createElement("span");
+  label.textContent = labelText;
+  field.append(label, control);
+  return field;
+}
+
+function checkboxControl(labelText: string, checked: boolean): { label: HTMLLabelElement; input: HTMLInputElement } {
+  const input = document.createElement("input");
+  input.type = "checkbox";
+  input.checked = checked;
+  const label = document.createElement("label");
+  label.className = "check-field";
+  const copy = document.createElement("span");
+  copy.textContent = labelText;
+  label.append(input, copy);
+  return { label, input };
+}
+
+function selectedPlatformsFromSummary(post: ScheduledPostSummary): Platform[] {
+  return (Object.entries(post.platforms) as Array<[Platform, boolean]>)
+    .filter(([, enabled]) => enabled)
+    .map(([platform]) => platform);
+}
+
 async function refreshSystemStatus(): Promise<void> {
   const refresh = requiredElement<HTMLButtonElement>("status-refresh");
   refresh.disabled = true;
@@ -851,9 +1156,50 @@ function renderSystemStatus(status: SystemStatusResponse): void {
   renderConnection("status-youtube", status.connections.youtube);
   renderConnection("status-instagram", status.connections.instagram);
   renderConnection("status-tiktok", status.connections.tiktok);
+  requiredElement<HTMLElement>("scheduled-count").textContent = String(status.scheduling.pendingCount);
+  requiredElement<HTMLElement>("next-scheduled-publish").textContent = status.scheduling.nextPublishAt
+    ? formatDate(status.scheduling.nextPublishAt)
+    : "None";
+  requiredElement<HTMLElement>("pending-media").textContent =
+    `${formatBytes(status.scheduling.pendingMediaBytes)} (${status.scheduling.pendingMediaObjectCount})`;
+  requiredElement<HTMLElement>("orphan-media").textContent =
+    `${formatBytes(status.scheduling.orphanStagingBytes)} (${status.scheduling.orphanStagingObjectCount})`;
+  for (const platform of ["youtube", "instagram", "tiktok"] as Platform[]) {
+    const result = status.platformResults[platform];
+    requiredElement<HTMLElement>(`${platform}-results`).textContent =
+      `${result.succeeded} succeeded · ${result.failed} failed · ${result.pending} pending`;
+  }
+  renderSchedulerRuns(status);
   renderJobs(status);
   renderEvents("errors-list", status.recentErrors, "No recent errors.");
   renderEvents("events-list", status.events, "No app events yet.");
+}
+
+function renderSchedulerRuns(status: SystemStatusResponse): void {
+  const list = requiredElement<HTMLOListElement>("scheduler-runs-list");
+  list.replaceChildren();
+  if (status.scheduling.recentRuns.length === 0) {
+    const item = document.createElement("li");
+    item.className = "empty-event";
+    item.textContent = "No scheduler runs yet.";
+    list.append(item);
+    return;
+  }
+  for (const run of status.scheduling.recentRuns) {
+    const item = document.createElement("li");
+    item.className = `event-item ${run.failed ? "event-error" : "event-info"}`;
+    const heading = document.createElement("div");
+    const label = document.createElement("strong");
+    label.textContent = `${run.processedPlatforms} platform step(s)`;
+    const time = document.createElement("time");
+    time.dateTime = run.finishedAt;
+    time.textContent = formatDate(run.finishedAt);
+    heading.append(label, time);
+    const detail = document.createElement("p");
+    detail.textContent = `${run.dueJobs} due · ${run.succeeded} completed · ${run.failed} errors · ${run.deletedObjects} objects cleaned`;
+    item.append(heading, detail);
+    list.append(item);
+  }
 }
 
 function renderConnection(id: string, connected: boolean): void {
@@ -1016,8 +1362,16 @@ function updateScheduleRequirement(): void {
   const youtubeEnabled = requiredElement<HTMLInputElement>("youtube-enabled").checked;
   scheduledAtInput.required = youtubeEnabled;
   requiredElement<HTMLElement>("timezone-label").textContent = youtubeEnabled
-    ? `YouTube schedules in ${timezone}; Instagram and TikTok publish immediately`
-    : "Instagram and TikTok publish immediately; no schedule will be used";
+    ? `All selected platforms use this time (${timezone}); YouTube uses its native schedule`
+    : `Choose a future time (${timezone}), or leave blank to publish Instagram/TikTok now`;
+}
+
+function setAllPlatforms(enabled: boolean): void {
+  for (const platform of ["youtube", "instagram", "tiktok"] as Platform[]) {
+    requiredElement<HTMLInputElement>(`${platform}-enabled`).checked = enabled;
+  }
+  updateScheduleRequirement();
+  if (enabled && tiktokConnected) void refreshTikTokCreatorInfo();
 }
 
 function selectedPlatforms(): Platform[] {
@@ -1091,6 +1445,11 @@ function formatBytes(bytes: number): string {
 function formatDate(value: string): string {
   const date = new Date(value);
   return Number.isNaN(date.getTime()) ? value : date.toLocaleString();
+}
+
+function toLocalDateTime(value: string): string {
+  const date = new Date(value);
+  return new Date(date.getTime() - date.getTimezoneOffset() * 60_000).toISOString().slice(0, 16);
 }
 
 function formatDuration(seconds: number): string {

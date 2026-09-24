@@ -43,7 +43,7 @@ export async function beginInstagramOAuth(env: Env): Promise<Response> {
   const { state, nonce } = await createSignedState(env.SESSION_SECRET);
   const authorizeUrl = new URL("https://www.instagram.com/oauth/authorize");
   authorizeUrl.search = new URLSearchParams({
-    client_id: env.META_APP_ID,
+    client_id: env.INSTAGRAM_APP_ID,
     redirect_uri: redirectUri(env),
     response_type: "code",
     scope: SCOPES,
@@ -83,8 +83,8 @@ export async function finishInstagramOAuth(request: Request, env: Env): Promise<
   if (!code) return redirect(env, "error", "Instagram did not return an authorization code.");
 
   const tokenForm = new FormData();
-  tokenForm.set("client_id", env.META_APP_ID);
-  tokenForm.set("client_secret", env.META_APP_SECRET);
+  tokenForm.set("client_id", env.INSTAGRAM_APP_ID);
+  tokenForm.set("client_secret", env.INSTAGRAM_APP_SECRET);
   tokenForm.set("grant_type", "authorization_code");
   tokenForm.set("redirect_uri", redirectUri(env));
   tokenForm.set("code", code.replace(/#_$/u, ""));
@@ -104,7 +104,7 @@ export async function finishInstagramOAuth(request: Request, env: Env): Promise<
   const longUrl = new URL("https://graph.instagram.com/access_token");
   longUrl.search = new URLSearchParams({
     grant_type: "ig_exchange_token",
-    client_secret: env.META_APP_SECRET,
+    client_secret: env.INSTAGRAM_APP_SECRET,
     access_token: shortToken.access_token,
   }).toString();
   const longResponse = await fetch(longUrl);
@@ -204,7 +204,7 @@ function hasRequiredScopes(permissions: string | string[]): boolean {
 }
 
 function requireConfiguration(env: Env): void {
-  if (!env.META_APP_ID || !env.META_APP_SECRET || !env.OAUTH_ENCRYPTION_KEY || !env.SESSION_SECRET || !env.APP_BASE_URL) {
+  if (!env.INSTAGRAM_APP_ID || !env.INSTAGRAM_APP_SECRET || !env.OAUTH_ENCRYPTION_KEY || !env.SESSION_SECRET || !env.APP_BASE_URL) {
     throw new Error("Instagram OAuth is not fully configured.");
   }
 }

@@ -5,6 +5,9 @@ interface YouTubeVideo {
   snippet?: {
     title?: string;
     description?: string;
+    categoryId?: string;
+    tags?: string[];
+    defaultLanguage?: string;
   };
   status?: {
     uploadStatus?: string;
@@ -13,6 +16,10 @@ interface YouTubeVideo {
     privacyStatus?: string;
     publishAt?: string;
     selfDeclaredMadeForKids?: boolean;
+    embeddable?: boolean;
+    license?: string;
+    publicStatsViewable?: boolean;
+    containsSyntheticMedia?: boolean;
   };
 }
 
@@ -107,6 +114,92 @@ export async function verifyYouTubeSchedule(
     }
   }
   throw lastError ?? new Error("Could not verify the YouTube upload.");
+}
+
+export async function uploadYouTubeVideoFromR2(
+  input: DraftRequest,
+  video: R2ObjectBody,
+  accessToken: string,
+): Promise<string> {
+  const uploadUrl = await startYouTubeUpload(input, accessToken);
+  const response = await fetch(uploadUrl, {
+    method: "PUT",
+    headers: {
+      authorization: `Bearer ${accessToken}`,
+      "content-type": input.assets.video.contentType,
+      "content-length": String(video.size),
+    },
+    body: video.body,
+  });
+  if (!response.ok) throw new Error(await googleError(response, "YouTube upload failed."));
+  const payload = (await response.json()) as { id?: string };
+  if (!payload.id) throw new Error("YouTube did not return a video ID after upload.");
+  return payload.id;
+}
+
+export async function updateYouTubeScheduledVideo(
+  videoId: string,
+  input: DraftRequest,
+  accessToken: string,
+): Promise<AcceptedYouTubeVideo> {
+  const existing = await getYouTubeVideo(videoId, accessToken);
+  const url = new URL("https://www.googleapis.com/youtube/v3/videos");
+  url.searchParams.set("part", "snippet,status");
+  const snippet = compact({
+    title: input.title.trim(),
+    description: input.description,
+    categoryId: existing.snippet?.categoryId ?? "22",
+    tags: existing.snippet?.tags,
+    defaultLanguage: existing.snippet?.defaultLanguage,
+  });
+  const status = compact({
+    privacyStatus: "private",
+    publishAt: input.scheduledAt,
+    selfDeclaredMadeForKids: input.youtube.madeForKids,
+    embeddable: existing.status?.embeddable,
+    license: existing.status?.license,
+    publicStatsViewable: existing.status?.publicStatsViewable,
+    containsSyntheticMedia: existing.status?.containsSyntheticMedia,
+  });
+  const response = await fetch(url, {
+    method: "PUT",
+    headers: {
+      authorization: `Bearer ${accessToken}`,
+      "content-type": "application/json; charset=UTF-8",
+    },
+    body: JSON.stringify({ id: videoId, snippet, status }),
+  });
+  if (!response.ok) throw new Error(await googleError(response, "YouTube rejected the scheduled post update."));
+  const updated = (await response.json()) as YouTubeVideo;
+  return assertScheduledVideoAccepted(updated, input, videoId);
+}
+
+export async function deleteYouTubeVideo(videoId: string, accessToken: string): Promise<void> {
+  const url = new URL("https://www.googleapis.com/youtube/v3/videos");
+  url.searchParams.set("id", videoId);
+  const response = await fetch(url, {
+    method: "DELETE",
+    headers: { authorization: `Bearer ${accessToken}` },
+  });
+  if (!response.ok && response.status !== 404) {
+    throw new Error(await googleError(response, "YouTube could not delete the scheduled video."));
+  }
+}
+
+async function getYouTubeVideo(videoId: string, accessToken: string): Promise<YouTubeVideo> {
+  const url = new URL("https://www.googleapis.com/youtube/v3/videos");
+  url.searchParams.set("part", "snippet,status");
+  url.searchParams.set("id", videoId);
+  const response = await fetch(url, { headers: { authorization: `Bearer ${accessToken}` } });
+  if (!response.ok) throw new Error(await googleError(response, "Could not load the scheduled YouTube video."));
+  const payload = (await response.json()) as VideoListResponse;
+  const video = payload.items?.[0];
+  if (!video) throw new Error("The scheduled YouTube video no longer exists.");
+  return video;
+}
+
+function compact<T extends Record<string, unknown>>(value: T): Partial<T> {
+  return Object.fromEntries(Object.entries(value).filter(([, item]) => item !== undefined && item !== null)) as Partial<T>;
 }
 
 export function assertScheduledVideoAccepted(
