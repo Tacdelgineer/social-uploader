@@ -58,6 +58,20 @@ describe("TikTok Direct Post", () => {
     expect(() => validateCreatorSettings(draft, creator)).not.toThrow();
   });
 
+  it("allows a creator-returned public privacy option only after production approval", () => {
+    const publicDraft: DraftRequest = {
+      ...draft,
+      tiktok: { ...draft.tiktok, privacy: "PUBLIC_TO_EVERYONE" },
+    };
+    const publicCreator: TikTokCreatorInfo = {
+      ...creator,
+      privacyLevelOptions: ["PUBLIC_TO_EVERYONE", "MUTUAL_FOLLOW_FRIENDS", "SELF_ONLY"],
+      isPrivateAccount: false,
+    };
+    expect(() => validateCreatorSettings(publicDraft, publicCreator)).toThrow("production approval");
+    expect(() => validateCreatorSettings(publicDraft, publicCreator, true)).not.toThrow();
+  });
+
   it("distinguishes public and private accounts from creator privacy options", () => {
     expect(isTikTokPrivateAccount(["PUBLIC_TO_EVERYONE", "MUTUAL_FOLLOW_FRIENDS", "SELF_ONLY"])).toBe(false);
     expect(isTikTokPrivateAccount(["FOLLOWER_OF_CREATOR", "MUTUAL_FOLLOW_FRIENDS", "SELF_ONLY"])).toBe(true);
@@ -65,8 +79,8 @@ describe("TikTok Direct Post", () => {
 
   it("rejects unavailable privacy, interactions, duration, or cover timestamps", () => {
     expect(() => validateCreatorSettings({ ...draft, tiktok: { ...draft.tiktok, consentConfirmed: false } }, creator)).toThrow("consent");
-    expect(() => validateCreatorSettings(draft, { ...creator, privacyLevelOptions: [] })).toThrow("SELF_ONLY");
-    expect(() => validateCreatorSettings(draft, { ...creator, isPrivateAccount: false })).toThrow("Private");
+    expect(() => validateCreatorSettings(draft, { ...creator, privacyLevelOptions: [] })).toThrow("privacy options");
+    expect(() => validateCreatorSettings(draft, { ...creator, isPrivateAccount: false })).toThrow("production approval");
     expect(() => validateCreatorSettings(draft, { ...creator, commentDisabled: true })).toThrow("comments");
     expect(() => validateCreatorSettings({ ...draft, videoDurationSeconds: 181 }, creator)).toThrow("limit");
     expect(() =>
@@ -87,7 +101,7 @@ describe("TikTok Direct Post", () => {
     }), { status: 403, headers: { "content-type": "application/json" } })));
 
     await expect(initializeTikTokDirectPost(draft, "not-a-real-token", creator)).rejects.toThrow(
-      /video\/init.*unaudited_client_can_only_post_to_private_accounts.*must be switched to Private.*2026092503402087C8D3FBCE4C2A11608B/u,
+      /video\/init.*unaudited_client_can_only_post_to_private_accounts.*production approval.*2026092503402087C8D3FBCE4C2A11608B/u,
     );
   });
 });

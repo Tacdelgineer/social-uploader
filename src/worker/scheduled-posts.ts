@@ -25,7 +25,8 @@ import {
 } from "./job-store";
 import { getYouTubeAccessToken } from "./oauth";
 import { getTikTokCredentials } from "./tiktok-oauth";
-import { queryTikTokCreatorInfo } from "./tiktok";
+import { queryTikTokCreatorInfo, validateCreatorSettings } from "./tiktok";
+import { isTikTokAppAudited } from "./tiktok-review";
 import { validateDraftRequest } from "./validation";
 import {
   deleteYouTubeVideo,
@@ -166,9 +167,7 @@ export async function editScheduledPost(
   if (candidate.platforms.tiktok) {
     const { accessToken } = await getTikTokCredentials(env);
     const creator = await queryTikTokCreatorInfo(accessToken);
-    if (!creator.isPrivateAccount) {
-      throw new Error("TikTok requires this account to be Private while the app is unaudited.");
-    }
+    validateCreatorSettings(candidate, creator, isTikTokAppAudited(env));
   }
   const youtubeToken = candidate.platforms.youtube || job.platforms.youtube
     ? await getYouTubeAccessToken(env)
@@ -269,9 +268,7 @@ export async function retryFailedPlatform(
   if (platform === "tiktok") {
     const { accessToken } = await getTikTokCredentials(env);
     const creator = await queryTikTokCreatorInfo(accessToken);
-    if (!creator.isPrivateAccount) {
-      throw new Error("TikTok requires this account to be Private while the app is unaudited.");
-    }
+    validateCreatorSettings(job, creator, isTikTokAppAudited(env));
   } else {
     await getInstagramCredentials(env);
   }

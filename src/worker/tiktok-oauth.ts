@@ -142,7 +142,7 @@ export async function disconnectTikTok(env: Env): Promise<void> {
 
 export async function getTikTokCredentials(
   env: Env,
-): Promise<{ accessToken: string; openId: string; displayName?: string }> {
+): Promise<{ accessToken: string; openId: string; displayName?: string; scope: string }> {
   requireConfiguration(env);
   const encrypted = await env.METADATA.get(TOKEN_KEY);
   if (!encrypted) throw new Error("Connect TikTok before submitting a TikTok post.");
@@ -153,7 +153,22 @@ export async function getTikTokCredentials(
   if (!hasRequiredScopes(tokens.scope)) {
     throw new Error("TikTok authorization lacks video.publish. Reconnect TikTok and approve Direct Post access.");
   }
-  return { accessToken: tokens.accessToken, openId: tokens.openId, displayName: tokens.displayName };
+  return {
+    accessToken: tokens.accessToken,
+    openId: tokens.openId,
+    displayName: tokens.displayName,
+    scope: tokens.scope,
+  };
+}
+
+export function tiktokLoginKitConfigured(env: Env): boolean {
+  return Boolean(
+    env.TIKTOK_CLIENT_KEY &&
+    env.TIKTOK_CLIENT_SECRET &&
+    env.OAUTH_ENCRYPTION_KEY &&
+    env.SESSION_SECRET &&
+    env.APP_BASE_URL
+  );
 }
 
 async function refreshTokens(tokens: StoredTikTokTokens, env: Env): Promise<StoredTikTokTokens> {
@@ -219,13 +234,7 @@ function hasRequiredScopes(scope: string): boolean {
 }
 
 function requireConfiguration(env: Env): void {
-  if (
-    !env.TIKTOK_CLIENT_KEY ||
-    !env.TIKTOK_CLIENT_SECRET ||
-    !env.OAUTH_ENCRYPTION_KEY ||
-    !env.SESSION_SECRET ||
-    !env.APP_BASE_URL
-  ) {
+  if (!tiktokLoginKitConfigured(env)) {
     throw new Error("TikTok OAuth is not fully configured.");
   }
 }

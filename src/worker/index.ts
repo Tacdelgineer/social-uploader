@@ -76,7 +76,9 @@ import {
   fetchTikTokPostStatus,
   initializeTikTokDirectPost,
   queryTikTokCreatorInfo,
+  validateCreatorSettings,
 } from "./tiktok";
+import { getTikTokReviewStatus, isTikTokAppAudited } from "./tiktok-review";
 import { extensionFor, validateDraftRequest, validatePresignRequest } from "./validation";
 import { setYouTubeThumbnail, startYouTubeUpload, verifyYouTubeSchedule } from "./youtube";
 
@@ -188,6 +190,9 @@ async function route(request: Request, env: Env): Promise<Response> {
   if (url.pathname === "/api/tiktok/creator-info" && request.method === "GET") {
     const { accessToken } = await getTikTokCredentials(env);
     return json(await queryTikTokCreatorInfo(accessToken));
+  }
+  if (url.pathname === "/api/tiktok/review-status" && request.method === "GET") {
+    return json(await getTikTokReviewStatus(env));
   }
   if (url.pathname === "/api/uploads/presign" && request.method === "POST") {
     return createPresignedUpload(request, env);
@@ -369,9 +374,11 @@ async function createJob(request: Request, env: Env): Promise<Response> {
   if (input.platforms.tiktok) {
     const { accessToken: tiktokAccessToken } = await getTikTokCredentials(env);
     const creator = await queryTikTokCreatorInfo(tiktokAccessToken);
-    if (!creator.isPrivateAccount) {
+    try {
+      validateCreatorSettings(input, creator, isTikTokAppAudited(env));
+    } catch (error) {
       return json(
-        { error: "TikTok requires this account to be Private while the app is unaudited." } satisfies ApiError,
+        { error: errorMessage(error) } satisfies ApiError,
         409,
       );
     }
@@ -786,7 +793,12 @@ async function startTikTokPublish(env: Env, jobId: string): Promise<Response> {
   try {
     const { accessToken } = await getTikTokCredentials(env);
     const creatorInfo = await queryTikTokCreatorInfo(accessToken);
-    const initialized = await initializeTikTokDirectPost(job, accessToken, creatorInfo);
+    const initialized = await initializeTikTokDirectPost(
+      job,
+      accessToken,
+      creatorInfo,
+      isTikTokAppAudited(env),
+    );
     const uploading = setPlatformStatus(
       {
         ...job,
@@ -808,7 +820,7 @@ async function startTikTokPublish(env: Env, jobId: string): Promise<Response> {
       category: "tiktok",
       platform: "tiktok",
       jobId,
-      message: `TikTok Direct Post ${initialized.publishId} initialized with FILE_UPLOAD and SELF_ONLY privacy.`,
+      message: `TikTok Direct Post ${initialized.publishId} initialized with FILE_UPLOAD and ${job.tiktok.privacy} privacy.`,
     });
     return json({
       publishId: initialized.publishId,
@@ -903,7 +915,7 @@ async function checkTikTokPublish(env: Env, jobId: string): Promise<Response> {
         category: "tiktok",
         platform: "tiktok",
         jobId,
-        message: `TikTok completed Direct Post ${job.tiktokResult!.publishId} with SELF_ONLY privacy.`,
+        message: `TikTok completed Direct Post ${job.tiktokResult!.publishId} with ${job.tiktok.privacy} privacy.`,
       });
     }
     return json(tiktokResponse(job));

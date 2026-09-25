@@ -7,7 +7,7 @@ Milestone 4 keeps the single Worker, KV namespace, and R2 bucket. It adds one fr
 - YouTube uploads immediately and uses native `status.publishAt` scheduling.
 - A future Instagram or TikTok post remains pending in KV. The cron sends it through the official publishing API at the first run at or after the selected time (normally within five minutes).
 - Instagram creates a Reel container from short-lived signed R2 URLs, waits for provider processing, publishes, and verifies the media.
-- TikTok queries creator settings at dispatch, initializes Direct Post with `FILE_UPLOAD`, and streams sequential 5–64 MiB chunks from R2. Uploads remain `SELF_ONLY` while the app is unaudited. TikTok also requires every posting account to be Private until the client passes audit.
+- TikTok queries creator settings at dispatch, initializes Direct Post with `FILE_UPLOAD`, and streams sequential 5–64 MiB chunks from R2. TikTok public posting remains blocked until the client passes production review; unaudited test posts remain subject to TikTok's private-account and `SELF_ONLY` restrictions.
 - Leaving publish time blank is supported for Instagram/TikTok-only jobs and publishes immediately. YouTube still requires a future native schedule.
 
 ## Storage safety
@@ -54,7 +54,7 @@ The dashboard accepts JPG, PNG, and WebP covers. When Instagram is selected, the
 
 ## TikTok consent and diagnostics
 
-TikTok Direct Post requires an explicit consent checkbox before a new immediate or scheduled job is accepted. The Worker verifies the stored token still includes `video.publish`, queries `creator_info` immediately before initialization, requires `SELF_ONLY` to appear in the returned privacy options, and uses the documented FILE_UPLOAD chunk calculation. Errors include the failing endpoint stage, `error.code`, message, and `log_id` in the visible response and System Status event.
+TikTok Direct Post requires an explicit consent checkbox before a new immediate or scheduled job is accepted. The Worker verifies the stored token still includes `video.publish`, queries `creator_info` immediately before initialization, validates the user's privacy choice against the returned options and current app-review mode, and uses the documented FILE_UPLOAD chunk calculation. Errors include the failing endpoint stage, `error.code`, message, and `log_id` in the visible response and System Status event.
 
 ## Scheduled-post management
 

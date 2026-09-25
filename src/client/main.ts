@@ -28,7 +28,9 @@ import {
   type StoredJob,
   type SystemStatusResponse,
   type TikTokCreatorInfo,
+  type TikTokPrivacy,
   type TikTokPublishStatusResponse,
+  type TikTokReviewStatus,
   type TikTokStartResponse,
   type YouTubeConnectionStatus,
 } from "../shared/contracts";
@@ -64,6 +66,9 @@ const tiktokConnect = requiredElement<HTMLButtonElement>("tiktok-connect");
 const tiktokDisconnect = requiredElement<HTMLButtonElement>("tiktok-disconnect");
 const tiktokConnectionLabel = requiredElement<HTMLElement>("tiktok-connection-label");
 const tiktokDirectPostConsent = requiredElement<HTMLInputElement>("tiktok-direct-post-consent");
+const tiktokPrivacy = requiredElement<HTMLSelectElement>("tiktok-privacy");
+const tiktokPromoteOwnBrand = requiredElement<HTMLInputElement>("tiktok-promote-own-brand");
+const tiktokPaidPartnership = requiredElement<HTMLInputElement>("tiktok-paid-partnership");
 const selectAllPlatformsButton = requiredElement<HTMLButtonElement>("select-all-platforms");
 const selectNoPlatformsButton = requiredElement<HTMLButtonElement>("select-no-platforms");
 const platformToggleInputs = Object.fromEntries(
@@ -81,6 +86,7 @@ let instagramConnected = false;
 let tiktokConnected = false;
 let videoDurationSeconds = 0;
 let tiktokCreatorInfo: TikTokCreatorInfo | null = null;
+let tiktokReviewStatus: TikTokReviewStatus | null = null;
 let toastTimer: number | undefined;
 let currentPercent = 0;
 let activeJobId: string | null = null;
@@ -144,6 +150,7 @@ tiktokConnect.addEventListener("click", () => {
 tiktokDisconnect.addEventListener("click", async () => {
   await disconnectPlatform("tiktok", tiktokDisconnect);
 });
+tiktokPrivacy.addEventListener("change", syncTikTokCommercialAvailability);
 
 cancelButton.addEventListener("click", () => {
   cancelRequested = true;
@@ -168,20 +175,15 @@ requiredElement<HTMLButtonElement>("open-failed-posts").addEventListener("click"
 
 form.addEventListener("submit", async (event) => {
   event.preventDefault();
-  if (!validateForm()) return;
-
   const selected = selectedPlatforms();
-  if (selected.includes("tiktok")) {
+  if (selected.includes("tiktok") && tiktokConnected) {
     await refreshTikTokCreatorInfo();
     if (!tiktokCreatorInfo) {
       showToast("TikTok creator settings could not be verified. Try again before submitting.", true);
       return;
     }
-    if (!tiktokCreatorInfo.isPrivateAccount) {
-      showToast("TikTok requires this account to be Private while the app is unaudited.", true);
-      return;
-    }
   }
+  if (!validateForm()) return;
 
   setBusy(true);
   cancelRequested = false;
@@ -449,8 +451,22 @@ function validateForm(): boolean {
       void refreshTikTokCreatorInfo();
       return false;
     }
-    if (!tiktokCreatorInfo.isPrivateAccount) {
-      showToast("TikTok requires this account to be Private while the app is unaudited.", true);
+    if (tiktokReviewStatus?.appRestriction === "unaudited" && !tiktokCreatorInfo.isPrivateAccount) {
+      showToast("TikTok public posting requires TikTok production approval.", true);
+      return false;
+    }
+    const privacy = tiktokPrivacy.value as TikTokPrivacy;
+    if (!privacy || !tiktokCreatorInfo.privacyLevelOptions.includes(privacy)) {
+      showToast("Choose one of the privacy options returned by TikTok.", true);
+      tiktokPrivacy.focus();
+      return false;
+    }
+    if (tiktokReviewStatus?.appRestriction === "unaudited" && privacy !== "SELF_ONLY") {
+      showToast("TikTok public posting requires TikTok production approval.", true);
+      return false;
+    }
+    if (tiktokPaidPartnership.checked && privacy === "SELF_ONLY") {
+      showToast("TikTok does not allow branded-content posts to use Only me privacy.", true);
       return false;
     }
     if (videoDurationSeconds > tiktokCreatorInfo.maxVideoDurationSeconds) {
@@ -503,12 +519,14 @@ function buildJob(jobId: string, videoKey: string, thumbnailKey: string, uploadT
       shareToFeed: requiredElement<HTMLInputElement>("instagram-share-to-feed").checked,
     },
     tiktok: {
-      privacy: "SELF_ONLY",
+      privacy: (tiktokPrivacy.value || "SELF_ONLY") as TikTokPrivacy,
       allowComments: requiredElement<HTMLInputElement>("tiktok-comments").checked,
       allowDuet: requiredElement<HTMLInputElement>("tiktok-duet").checked,
       allowStitch: requiredElement<HTMLInputElement>("tiktok-stitch").checked,
       coverTimestampMs: Number(requiredElement<HTMLInputElement>("tiktok-cover-timestamp").value),
       consentConfirmed: tiktokDirectPostConsent.checked,
+      promoteOwnBrand: tiktokPromoteOwnBrand.checked,
+      paidPartnership: tiktokPaidPartnership.checked,
     },
     assets: {
       video: toAsset(videoKey, videoFile!),
@@ -612,11 +630,12 @@ async function runInstagramPublish(jobId: string): Promise<void> {
 }
 
 async function runTikTokPublish(jobId: string): Promise<void> {
-  setProgress("processing", "Querying TikTok creator settings and initializing SELF_ONLY Direct Post...", 80);
+  setProgress("processing", `Querying TikTok creator settings and initializing ${privacyLabel(tiktokPrivacy.value)} Direct Post...`, 80);
   const initialized = await apiRequest<TikTokStartResponse>(
     `/api/jobs/${encodeURIComponent(jobId)}/tiktok/start`,
     { method: "POST", body: "{}" },
   );
+  setReviewDiagnostic("review-direct-post", true, "Initialized", "Not initialized yet");
   setProgress("uploading", "Uploading the video to TikTok with FILE_UPLOAD...", 82);
   await uploadDirectToTikTok(initialized, videoFile!, (value) => {
     setProgress("uploading", "Uploading the video to TikTok with FILE_UPLOAD...", 82 + Math.round(value * 12));
@@ -803,7 +822,7 @@ function showJobResult(job: StoredJob, operationErrors: string[]): void {
       row.textContent = `Instagram published Reel ${job.instagramResult.mediaId}`;
     } else if (platform === "tiktok" && job.tiktokResult) {
       row.textContent = job.tiktokResult.status === "PUBLISH_COMPLETE"
-        ? `TikTok published ${job.tiktokResult.publishId} as SELF_ONLY`
+        ? `TikTok published ${job.tiktokResult.publishId} with ${privacyLabel(job.tiktok.privacy)} privacy`
         : `TikTok ${job.tiktokResult.publishId}: ${humanizeStatus(job.tiktokResult.status)}`;
     } else if (pendingSchedule && status === "pending") {
       row.textContent = `${capitalize(platform)}: Social Uploader will send it at publish time`;
@@ -856,11 +875,11 @@ async function refreshConnectionStatuses(): Promise<void> {
   }
   if (tiktok.status === "fulfilled") {
     setTikTokConnection(tiktok.value.connected, tiktok.value.displayName);
-    if (tiktok.value.connected) void refreshTikTokCreatorInfo();
   } else {
     setTikTokConnection(false);
     tiktokConnectionLabel.textContent = "Connection check failed";
   }
+  await refreshTikTokCreatorInfo();
 }
 
 function setYouTubeConnection(connected: boolean): void {
@@ -898,6 +917,7 @@ function setTikTokConnection(connected: boolean, displayName?: string): void {
   if (!connected) {
     tiktokCreatorInfo = null;
     requiredElement<HTMLElement>("tiktok-creator-info").textContent = "Connect TikTok to load creator posting limits.";
+    resetTikTokPrivacyOptions();
   }
 }
 
@@ -917,17 +937,104 @@ async function disconnectPlatform(platform: "instagram" | "tiktok", button: HTML
 
 async function refreshTikTokCreatorInfo(): Promise<void> {
   try {
-    const info = await apiRequest<TikTokCreatorInfo>("/api/tiktok/creator-info");
+    const review = await apiRequest<TikTokReviewStatus>("/api/tiktok/review-status");
+    tiktokReviewStatus = review;
+    renderTikTokReviewStatus(review);
+    const info = review.creatorInfo;
+    if (!info) {
+      tiktokCreatorInfo = null;
+      resetTikTokPrivacyOptions();
+      requiredElement<HTMLElement>("tiktok-creator-info").textContent = review.creatorInfoError ??
+        "Connect TikTok to load creator posting limits.";
+      return;
+    }
     tiktokCreatorInfo = info;
+    configureTikTokPrivacy(info, review.appRestriction);
+    syncTikTokCommercialAvailability();
     requiredElement<HTMLElement>("tiktok-creator-info").textContent =
-      `${info.nickname} (@${info.username}) · ${info.isPrivateAccount ? "Private account ready" : "Public account — posting blocked in testing mode"} · up to ${info.maxVideoDurationSeconds}s.`;
+      `${info.nickname} (@${info.username}) · privacy: ${info.privacyLevelOptions.map(privacyLabel).join(", ")} · ` +
+      `comments ${info.commentDisabled ? "unavailable" : "available"}, Duet ${info.duetDisabled ? "unavailable" : "available"}, ` +
+      `Stitch ${info.stitchDisabled ? "unavailable" : "available"} · up to ${info.maxVideoDurationSeconds}s.`;
     configureTikTokInteraction("tiktok-comments", info.commentDisabled);
     configureTikTokInteraction("tiktok-duet", info.duetDisabled);
     configureTikTokInteraction("tiktok-stitch", info.stitchDisabled);
   } catch (error) {
     tiktokCreatorInfo = null;
+    tiktokReviewStatus = null;
+    resetTikTokPrivacyOptions();
     requiredElement<HTMLElement>("tiktok-creator-info").textContent = `Creator settings unavailable: ${errorMessage(error)}`;
+    renderTikTokReviewStatus(null);
   }
+}
+
+function configureTikTokPrivacy(
+  info: TikTokCreatorInfo,
+  appRestriction: TikTokReviewStatus["appRestriction"],
+): void {
+  const previous = tiktokPrivacy.value;
+  tiktokPrivacy.replaceChildren();
+  const placeholder = document.createElement("option");
+  placeholder.value = "";
+  placeholder.textContent = "Choose privacy";
+  tiktokPrivacy.append(placeholder);
+  for (const value of info.privacyLevelOptions) {
+    const option = document.createElement("option");
+    option.value = value;
+    option.textContent = privacyLabel(value);
+    option.disabled = appRestriction === "unaudited" && value !== "SELF_ONLY";
+    if (option.disabled) option.textContent += " (requires production approval)";
+    tiktokPrivacy.append(option);
+  }
+  tiktokPrivacy.disabled = false;
+  tiktokPrivacy.value = info.privacyLevelOptions.includes(previous) &&
+    !(appRestriction === "unaudited" && previous !== "SELF_ONLY")
+    ? previous
+    : "";
+}
+
+function resetTikTokPrivacyOptions(): void {
+  tiktokPrivacy.replaceChildren();
+  const option = document.createElement("option");
+  option.value = "";
+  option.textContent = "Connect TikTok to load options";
+  tiktokPrivacy.append(option);
+  tiktokPrivacy.disabled = true;
+}
+
+function syncTikTokCommercialAvailability(): void {
+  const disabled = tiktokReviewStatus?.appRestriction === "unaudited" || tiktokPrivacy.value === "SELF_ONLY";
+  tiktokPaidPartnership.disabled = disabled;
+  tiktokPaidPartnership.title = disabled
+    ? "Branded content requires a non-private privacy option and TikTok production approval."
+    : "";
+  if (disabled) tiktokPaidPartnership.checked = false;
+}
+
+function renderTikTokReviewStatus(status: TikTokReviewStatus | null): void {
+  setReviewDiagnostic("review-login-kit", status?.loginKitConfigured, "Configured", "Not configured");
+  setReviewDiagnostic("review-video-publish", status?.videoPublishScopeGranted, "Granted", "Not granted");
+  setReviewDiagnostic("review-creator-info", status?.creatorInfoWorking, "Working", "Not verified");
+  setReviewDiagnostic("review-direct-post", status?.directPostInitialized, "Initialized", "Not initialized yet");
+  const restriction = requiredElement<HTMLElement>("review-app-restriction");
+  restriction.textContent = status
+    ? status.appRestriction === "approved" ? "Production approved" : "Unaudited"
+    : "Unavailable";
+  restriction.classList.toggle("is-ready", status?.appRestriction === "approved");
+}
+
+function setReviewDiagnostic(id: string, ready: boolean | undefined, readyText: string, pendingText: string): void {
+  const element = requiredElement<HTMLElement>(id);
+  element.textContent = ready === undefined ? "Unavailable" : ready ? readyText : pendingText;
+  element.classList.toggle("is-ready", ready === true);
+}
+
+function privacyLabel(value: string): string {
+  return ({
+    PUBLIC_TO_EVERYONE: "Everyone",
+    MUTUAL_FOLLOW_FRIENDS: "Friends",
+    FOLLOWER_OF_CREATOR: "Followers",
+    SELF_ONLY: "Only me",
+  } as Record<string, string>)[value] ?? value;
 }
 
 function configureTikTokInteraction(id: string, providerDisabled: boolean): void {
@@ -1125,9 +1232,9 @@ function retryActionFor(post: ScheduledPostSummary, platform: Platform): HTMLEle
       prerequisite.textContent = "Reconnect TikTok to retry";
       return prerequisite;
     }
-    if (!tiktokCreatorInfo?.isPrivateAccount) {
+    if (tiktokReviewStatus?.appRestriction === "unaudited" && !tiktokCreatorInfo?.isPrivateAccount) {
       prerequisite.textContent = tiktokCreatorInfo
-        ? "TikTok requires this account to be Private while the app is unaudited."
+        ? "TikTok public posting requires TikTok production approval."
         : "Checking TikTok prerequisites…";
       return prerequisite;
     }
@@ -1177,8 +1284,12 @@ function effectivePlatformState(
 
 function humanReadablePlatformError(platform: Platform, error?: string): string {
   if (!error) return `${capitalize(platform)} delivery failed.`;
-  if (error.includes("unaudited_client_can_only_post_to_private_accounts") || error.includes("must be switched to Private")) {
-    return "TikTok account must be Private while app is unaudited";
+  if (
+    error.includes("unaudited_client_can_only_post_to_private_accounts") ||
+    error.includes("must be switched to Private") ||
+    error.includes("production approval")
+  ) {
+    return "TikTok public posting requires TikTok production approval";
   }
   if (error.includes("scope_not_authorized") || error.includes("video.publish")) {
     return "TikTok publishing permission is missing";
@@ -1242,7 +1353,7 @@ function createScheduledEditForm(post: ScheduledPostSummary): HTMLFormElement {
   const instagramSettings = groupedSettings("Instagram settings", shareToFeed.label);
   const tiktokNote = document.createElement("p");
   tiktokNote.className = "settings-note restriction-note";
-  tiktokNote.textContent = "Testing mode: TikTok account must be Private and posts are SELF_ONLY.";
+  tiktokNote.textContent = "TikTok public posting requires TikTok production approval.";
   const tiktokSettings = groupedSettings(
     "TikTok settings",
     comments.label,
@@ -1301,8 +1412,12 @@ function createScheduledEditForm(post: ScheduledPostSummary): HTMLFormElement {
       consent.input.focus();
       return;
     }
-    if (selected.includes("tiktok") && !tiktokCreatorInfo?.isPrivateAccount) {
-      showToast("TikTok requires this account to be Private while the app is unaudited.", true);
+    if (
+      selected.includes("tiktok") &&
+      tiktokReviewStatus?.appRestriction === "unaudited" &&
+      !tiktokCreatorInfo?.isPrivateAccount
+    ) {
+      showToast("TikTok public posting requires TikTok production approval.", true);
       return;
     }
     save.disabled = true;
@@ -1324,12 +1439,14 @@ function createScheduledEditForm(post: ScheduledPostSummary): HTMLFormElement {
         youtube: { visibility: "public", madeForKids: madeForKids.input.checked },
         instagram: { shareToFeed: shareToFeed.input.checked },
         tiktok: {
-          privacy: "SELF_ONLY",
+          privacy: post.tiktok.privacy,
           allowComments: comments.input.checked,
           allowDuet: duet.input.checked,
           allowStitch: stitch.input.checked,
           coverTimestampMs: Number(cover.input.value),
           consentConfirmed: consent.input.checked,
+          promoteOwnBrand: post.tiktok.promoteOwnBrand === true,
+          paidPartnership: post.tiktok.paidPartnership === true,
         },
       };
       await apiRequest(`/api/jobs/${encodeURIComponent(post.id)}`, {

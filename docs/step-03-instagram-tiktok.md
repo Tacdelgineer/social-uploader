@@ -65,7 +65,7 @@ npm run check
 npm run deploy
 ```
 
-After deployment, manually test Connect/Reconnect/Disconnect for both providers, then test each destination alone and all three together. Confirm the Instagram Reel cover/caption, the TikTok SELF_ONLY post and selected interaction flags/cover timestamp, the YouTube native schedule, and that System Status reports zero temporary media objects after every selected transfer has released the source.
+After deployment, manually test Connect/Reconnect/Disconnect for both providers, then test each destination alone and all three together. Confirm the Instagram Reel cover/caption, the TikTok privacy choice and selected interaction flags/cover timestamp, the YouTube native schedule, and that System Status reports zero temporary media objects after every selected transfer has released the source.
 
 ## Current limitations
 

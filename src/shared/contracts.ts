@@ -10,6 +10,11 @@ export const YOUTUBE_THUMBNAIL_CONTENT_TYPES = ["image/jpeg", "image/png"] as co
 
 export type AssetKind = "video" | "thumbnail";
 export type Platform = "youtube" | "instagram" | "tiktok";
+export type TikTokPrivacy =
+  | "PUBLIC_TO_EVERYONE"
+  | "MUTUAL_FOLLOW_FRIENDS"
+  | "FOLLOWER_OF_CREATOR"
+  | "SELF_ONLY";
 export type JobStatus =
   | "uploading"
   | "processing"
@@ -74,12 +79,14 @@ export interface InstagramSettings {
 }
 
 export interface TikTokSettings {
-  privacy: "SELF_ONLY";
+  privacy: TikTokPrivacy;
   allowComments: boolean;
   allowDuet: boolean;
   allowStitch: boolean;
   coverTimestampMs: number;
   consentConfirmed: boolean;
+  promoteOwnBrand?: boolean;
+  paidPartnership?: boolean;
 }
 
 export interface DraftRequest {
@@ -231,6 +238,16 @@ export interface TikTokCreatorInfo {
   stitchDisabled: boolean;
   maxVideoDurationSeconds: number;
   isPrivateAccount: boolean;
+}
+
+export interface TikTokReviewStatus {
+  loginKitConfigured: boolean;
+  videoPublishScopeGranted: boolean;
+  creatorInfoWorking: boolean;
+  directPostInitialized: boolean;
+  appRestriction: "unaudited" | "approved";
+  creatorInfo?: TikTokCreatorInfo;
+  creatorInfoError?: string;
 }
 
 export interface TikTokStartResponse {

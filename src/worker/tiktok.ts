@@ -75,8 +75,9 @@ export async function initializeTikTokDirectPost(
   input: DraftRequest,
   accessToken: string,
   creator: TikTokCreatorInfo,
+  appAudited = false,
 ): Promise<{ publishId: string; uploadUrl: string; chunkSize: number; totalChunkCount: number }> {
-  validateCreatorSettings(input, creator);
+  validateCreatorSettings(input, creator, appAudited);
   const { chunkSize, totalChunkCount } = calculateTikTokChunks(input.assets.video.size);
   const caption = input.description || input.title;
   const payload = await tiktokRequest<InitPayload>(
@@ -85,11 +86,13 @@ export async function initializeTikTokDirectPost(
     {
       post_info: {
         title: caption,
-        privacy_level: "SELF_ONLY",
+        privacy_level: input.tiktok.privacy,
         disable_comment: !input.tiktok.allowComments,
         disable_duet: !input.tiktok.allowDuet,
         disable_stitch: !input.tiktok.allowStitch,
         video_cover_timestamp_ms: input.tiktok.coverTimestampMs,
+        brand_organic_toggle: input.tiktok.promoteOwnBrand === true,
+        brand_content_toggle: input.tiktok.paidPartnership === true,
       },
       source_info: {
         source: "FILE_UPLOAD",
@@ -151,15 +154,22 @@ export function calculateTikTokChunks(videoSize: number): {
   };
 }
 
-export function validateCreatorSettings(input: DraftRequest, creator: TikTokCreatorInfo): void {
+export function validateCreatorSettings(
+  input: DraftRequest,
+  creator: TikTokCreatorInfo,
+  appAudited = false,
+): void {
   if (!input.tiktok.consentConfirmed) {
     throw new Error("TikTok Direct Post requires the user's explicit consent before initialization.");
   }
-  if (!creator.privacyLevelOptions.includes("SELF_ONLY")) {
-    throw new Error("TikTok did not offer SELF_ONLY for this creator; the unaudited app will not bypass that restriction.");
+  if (!creator.privacyLevelOptions.includes(input.tiktok.privacy)) {
+    throw new Error("Choose one of the privacy options returned by TikTok for this creator.");
   }
-  if (!creator.isPrivateAccount) {
-    throw new Error("TikTok requires this account to be Private while the app is unaudited.");
+  if (!appAudited && (input.tiktok.privacy !== "SELF_ONLY" || !creator.isPrivateAccount)) {
+    throw new Error("TikTok public posting requires TikTok production approval.");
+  }
+  if (input.tiktok.paidPartnership && input.tiktok.privacy === "SELF_ONLY") {
+    throw new Error("TikTok does not allow branded-content posts to use Only me privacy.");
   }
   if (input.videoDurationSeconds > creator.maxVideoDurationSeconds + 0.05) {
     throw new Error(
@@ -201,7 +211,7 @@ async function tiktokRequest<T>(
     const logId = envelope.error?.log_id ?? envelope.error?.logid;
     const detail = envelope.error?.message || fallback;
     const privateAccountHelp = code === "unaudited_client_can_only_post_to_private_accounts"
-      ? " The connected TikTok account must be switched to Private while this app is unaudited."
+      ? " TikTok public posting requires TikTok production approval."
       : "";
     throw new Error(
       `TikTok ${stage} failed${code ? ` [error.code: ${code}]` : ""}: ${detail}.${privateAccountHelp}` +

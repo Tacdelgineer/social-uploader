@@ -12,6 +12,13 @@ import {
   type UploadFileRequest,
 } from "../shared/contracts";
 
+const TIKTOK_PRIVACY_OPTIONS = new Set([
+  "PUBLIC_TO_EVERYONE",
+  "MUTUAL_FOLLOW_FRIENDS",
+  "FOLLOWER_OF_CREATOR",
+  "SELF_ONLY",
+]);
+
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const ASSET_KEY_PATTERN = /^(?:uploads|staging|scheduled)\/([0-9a-f-]{36})\/(video\.mp4|thumbnail(?:-[0-9a-f-]{36})?\.(jpg|png|webp))$/i;
 const TIMEZONE_PATTERN = /^[A-Za-z0-9_+\-/]{1,100}$/;
@@ -103,12 +110,15 @@ export function validateDraftRequest(value: unknown, now = new Date()): DraftReq
   if (!isRecord(instagram) || typeof instagram.shareToFeed !== "boolean") return null;
   if (
     !isRecord(tiktok) ||
-    tiktok.privacy !== "SELF_ONLY" ||
+    typeof tiktok.privacy !== "string" ||
+    !TIKTOK_PRIVACY_OPTIONS.has(tiktok.privacy) ||
     typeof tiktok.allowComments !== "boolean" ||
     typeof tiktok.allowDuet !== "boolean" ||
     typeof tiktok.allowStitch !== "boolean" ||
     typeof tiktok.consentConfirmed !== "boolean" ||
     (platforms.tiktok && !tiktok.consentConfirmed) ||
+    (tiktok.promoteOwnBrand !== undefined && typeof tiktok.promoteOwnBrand !== "boolean") ||
+    (tiktok.paidPartnership !== undefined && typeof tiktok.paidPartnership !== "boolean") ||
     typeof tiktok.coverTimestampMs !== "number" ||
     !Number.isSafeInteger(tiktok.coverTimestampMs) ||
     tiktok.coverTimestampMs < 0 ||

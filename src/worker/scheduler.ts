@@ -26,6 +26,7 @@ import {
   initializeTikTokDirectPost,
   queryTikTokCreatorInfo,
 } from "./tiktok";
+import { isTikTokAppAudited } from "./tiktok-review";
 
 const RUNS_KEY = "scheduler:runs";
 const MAX_RUNS = 12;
@@ -183,7 +184,12 @@ async function processTikTokStep(env: Env, job: StoredJob): Promise<StoredJob> {
   let current = job;
   if (!current.tiktokResult) {
     const creator = await queryTikTokCreatorInfo(accessToken);
-    const initialized = await initializeTikTokDirectPost(current, accessToken, creator);
+    const initialized = await initializeTikTokDirectPost(
+      current,
+      accessToken,
+      creator,
+      isTikTokAppAudited(env),
+    );
     const encryptedUploadUrl = await encryptJson(
       { uploadUrl: initialized.uploadUrl },
       env.OAUTH_ENCRYPTION_KEY,
@@ -287,7 +293,7 @@ async function processTikTokStep(env: Env, job: StoredJob): Promise<StoredJob> {
       category: "tiktok",
       platform: "tiktok",
       jobId: current.id,
-      message: `Scheduler completed TikTok Direct Post ${result.publishId} as SELF_ONLY.`,
+      message: `Scheduler completed TikTok Direct Post ${result.publishId} with ${current.tiktok.privacy} privacy.`,
     });
   }
   return current;

@@ -12,12 +12,12 @@ Pending future jobs keep the existing edit and cancel behavior. Platform-specifi
 
 Instagram and TikTok failures can be retried independently while their source is retained. A retry resets only the selected failed step; a platform already marked scheduled or published is not posted again. The original retry expiration is preserved, so repeated retries never extend retention.
 
-Before a TikTok job is accepted or retried, the Worker queries `creator_info/query`. In unaudited testing mode, the returned privacy options must identify a Private account, and posts remain forced to `SELF_ONLY`. The dashboard performs the same preflight before staging a new upload. The scheduler queries creator info again immediately before Direct Post initialization.
+Before a TikTok job is accepted or retried, the Worker queries `creator_info/query`. In unaudited testing mode, public posting is blocked with an explanation that TikTok production approval is required. After approval, the app can use a privacy option returned for the creator. The dashboard performs the same preflight before staging a new upload. The scheduler queries creator info again immediately before Direct Post initialization.
 
-If TikTok is still public, the job or retry is blocked with:
+If an unaudited client attempts public posting, the job or retry is blocked with:
 
 ```text
-TikTok requires this account to be Private while the app is unaudited.
+TikTok public posting requires TikTok production approval.
 ```
 
 ## Temporary-media lifecycle

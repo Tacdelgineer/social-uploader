@@ -13,6 +13,7 @@ export interface Env {
   INSTAGRAM_APP_SECRET: string;
   TIKTOK_CLIENT_KEY: string;
   TIKTOK_CLIENT_SECRET: string;
+  TIKTOK_APP_AUDITED?: string;
   OAUTH_ENCRYPTION_KEY: string;
   SESSION_SECRET: string;
 }
