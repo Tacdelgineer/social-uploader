@@ -1,19 +1,12 @@
 import "./styles.css";
 import {
-  PLATFORMS,
-  allPlatformSelection,
-  selectedPlatformsFor,
-  selectionControlState,
-  withPlatformSelection,
-  type PlatformSelection,
-} from "./platform-selection";
-import {
+  BATCH_MAX_POSTS,
   INSTAGRAM_VIDEO_MAX_BYTES,
-  THUMBNAIL_CONTENT_TYPES,
-  THUMBNAIL_MAX_BYTES,
-  VIDEO_CONTENT_TYPES,
+  R2_STORAGE_CAP_BYTES,
   VIDEO_MAX_BYTES,
   type ApiError,
+  type BatchPresignRequest,
+  type BatchPresignResponse,
   type CompleteYouTubeResponse,
   type CreateJobResponse,
   type DraftRequest,
@@ -22,10 +15,8 @@ import {
   type Platform,
   type PlatformConnectionStatus,
   type PresignRequest,
-  type PresignResponse,
   type ScheduledPostSummary,
   type ScheduledPostsResponse,
-  type StoredJob,
   type SystemStatusResponse,
   type TikTokCreatorInfo,
   type TikTokPrivacy,
@@ -34,1864 +25,624 @@ import {
   type TikTokStartResponse,
   type YouTubeConnectionStatus,
 } from "../shared/contracts";
-import { prepareThumbnailForPlatforms } from "./thumbnail";
 
-type UploadState = "uploading" | "processing" | "scheduled" | "failed" | "cancelled";
-type PostFilter = "upcoming" | "failed" | "published" | "cancelled";
-
-const form = requiredElement<HTMLFormElement>("draft-form");
-const videoInput = requiredElement<HTMLInputElement>("video-input");
-const thumbnailInput = requiredElement<HTMLInputElement>("thumbnail-input");
-const videoDropzone = requiredElement<HTMLElement>("video-dropzone");
-const thumbnailDropzone = requiredElement<HTMLElement>("thumbnail-dropzone");
-const titleInput = requiredElement<HTMLInputElement>("title");
-const descriptionInput = requiredElement<HTMLTextAreaElement>("description");
-const scheduledAtInput = requiredElement<HTMLInputElement>("scheduled-at");
-const saveButton = requiredElement<HTMLButtonElement>("save-button");
-const cancelButton = requiredElement<HTMLButtonElement>("cancel-upload");
-const uploadStatus = requiredElement<HTMLElement>("upload-status");
-const statusState = requiredElement<HTMLElement>("status-state");
-const statusLabel = requiredElement<HTMLElement>("status-label");
-const statusPercent = requiredElement<HTMLElement>("status-percent");
-const progressBar = requiredElement<HTMLElement>("progress-bar");
-const uploadResult = requiredElement<HTMLElement>("upload-result");
-const toast = requiredElement<HTMLElement>("toast");
-const youtubeConnect = requiredElement<HTMLButtonElement>("youtube-connect");
-const youtubeDisconnect = requiredElement<HTMLButtonElement>("youtube-disconnect");
-const youtubeConnectionLabel = requiredElement<HTMLElement>("youtube-connection-label");
-const instagramConnect = requiredElement<HTMLButtonElement>("instagram-connect");
-const instagramDisconnect = requiredElement<HTMLButtonElement>("instagram-disconnect");
-const instagramConnectionLabel = requiredElement<HTMLElement>("instagram-connection-label");
-const tiktokConnect = requiredElement<HTMLButtonElement>("tiktok-connect");
-const tiktokDisconnect = requiredElement<HTMLButtonElement>("tiktok-disconnect");
-const tiktokConnectionLabel = requiredElement<HTMLElement>("tiktok-connection-label");
-const tiktokDirectPostConsent = requiredElement<HTMLInputElement>("tiktok-direct-post-consent");
-const tiktokPrivacy = requiredElement<HTMLSelectElement>("tiktok-privacy");
-const tiktokPromoteOwnBrand = requiredElement<HTMLInputElement>("tiktok-promote-own-brand");
-const tiktokPaidPartnership = requiredElement<HTMLInputElement>("tiktok-paid-partnership");
-const selectAllPlatformsButton = requiredElement<HTMLButtonElement>("select-all-platforms");
-const selectNoPlatformsButton = requiredElement<HTMLButtonElement>("select-no-platforms");
-const platformToggleInputs = Object.fromEntries(
-  PLATFORMS.map((platform) => [
-    platform,
-    requiredElement<HTMLInputElement>(`${platform}-enabled`),
-  ]),
-) as Record<Platform, HTMLInputElement>;
-
-let videoFile: File | null = null;
-let thumbnailFile: File | null = null;
-let thumbnailObjectUrl: string | null = null;
-let youtubeConnected = false;
-let instagramConnected = false;
-let tiktokConnected = false;
-let videoDurationSeconds = 0;
-let tiktokCreatorInfo: TikTokCreatorInfo | null = null;
-let tiktokReviewStatus: TikTokReviewStatus | null = null;
-let toastTimer: number | undefined;
-let currentPercent = 0;
-let activeJobId: string | null = null;
-let cancelRequested = false;
-let platformSelection: PlatformSelection = selectionFromToggleInputs();
-let postsCache: ScheduledPostSummary[] = [];
-let activePostFilter: PostFilter = "upcoming";
-const activeXhrs = new Set<XMLHttpRequest>();
+const PLATFORMS = ["youtube", "instagram", "tiktok"] as const;
+const LABELS: Record<Platform, string> = { youtube: "YT", instagram: "IG", tiktok: "TT" };
 const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
 
-setupDropzone(videoDropzone, videoInput, setVideo);
-setupDropzone(thumbnailDropzone, thumbnailInput, setThumbnail);
-setupViewNavigation();
-setupPlatformSelectionControls();
-setScheduleMinimum();
-updateScheduleRequirement();
-void refreshConnectionStatuses();
+type Selection = Record<Platform, boolean>;
+type DraftStatus = "ready" | "preparing" | "uploading" | "processing" | "scheduled" | "completed" | "failed" | "cancelled";
+interface Settings {
+  youtubeMadeForKids: boolean;
+  instagramShareToFeed: boolean;
+  tiktokPrivacy: TikTokPrivacy;
+  tiktokComments: boolean;
+  tiktokDuet: boolean;
+  tiktokStitch: boolean;
+  tiktokConsent: boolean;
+  tiktokPromoteOwnBrand: boolean;
+  tiktokPaidPartnership: boolean;
+}
+interface BatchDraft {
+  id: string;
+  file: File;
+  thumbnail: File;
+  thumbnailUrl: string;
+  duration: number;
+  title: string;
+  caption: string;
+  platforms: Selection;
+  scheduledAt: string;
+  settings: Settings;
+  selected: boolean;
+  status: DraftStatus;
+  progress: number;
+  error?: string;
+  createdJob: boolean;
+}
+
+const drafts: BatchDraft[] = [];
+let posts: ScheduledPostSummary[] = [];
+let connected: Selection = { youtube: false, instagram: false, tiktok: false };
+let tiktokCreator: TikTokCreatorInfo | null = null;
+let tiktokReview: TikTokReviewStatus | null = null;
+let batchCancelled = false;
+let toastTimer: number | undefined;
+let platformDialogAction: ((selection: Selection, tiktokConsent: boolean) => void) | null = null;
+const activeXhrs = new Set<XMLHttpRequest>();
+
+const videoInput = el<HTMLInputElement>("video-input");
+const dropzone = el<HTMLElement>("video-dropzone");
+const draftSection = el<HTMLElement>("draft-section");
+const draftList = el<HTMLElement>("draft-list");
+const defaultSchedule = el<HTMLInputElement>("default-schedule");
+
+setMinimumDates();
+setupNavigation();
+setupConnections();
+setupDefaults();
+setupDropzone();
+setupBatchActions();
+setupPostActions();
 showOAuthResult();
+void refreshConnections();
 
-selectAllPlatformsButton.addEventListener("click", () => {
-  setAllPlatforms(true);
-});
-selectNoPlatformsButton.addEventListener("click", () => {
-  setAllPlatforms(false);
-});
-
-titleInput.addEventListener("input", () => updateCount("title-count", titleInput.value.length));
-descriptionInput.addEventListener("input", () =>
-  updateCount("description-count", descriptionInput.value.length),
-);
-
-youtubeConnect.addEventListener("click", () => {
-  window.location.assign("/api/oauth/youtube/start");
-});
-
-youtubeDisconnect.addEventListener("click", async () => {
-  youtubeDisconnect.disabled = true;
-  try {
-    await apiRequest("/api/oauth/youtube/disconnect", { method: "POST", body: "{}" });
-    setYouTubeConnection(false);
-    showToast("YouTube disconnected.");
-  } catch (error) {
-    showToast(errorMessage(error), true);
-  } finally {
-    youtubeDisconnect.disabled = false;
-  }
-});
-
-instagramConnect.addEventListener("click", () => {
-  window.location.assign("/api/oauth/instagram/start");
-});
-
-instagramDisconnect.addEventListener("click", async () => {
-  await disconnectPlatform("instagram", instagramDisconnect);
-});
-
-tiktokConnect.addEventListener("click", () => {
-  window.location.assign("/api/oauth/tiktok/start");
-});
-
-tiktokDisconnect.addEventListener("click", async () => {
-  await disconnectPlatform("tiktok", tiktokDisconnect);
-});
-tiktokPrivacy.addEventListener("change", syncTikTokCommercialAvailability);
-
-cancelButton.addEventListener("click", () => {
-  cancelRequested = true;
-  for (const xhr of activeXhrs) xhr.abort();
-  setProgress("cancelled", "Upload cancelled", currentPercent);
-  if (activeJobId) void reportJobState(activeJobId, "cancelled", "Upload cancelled by user.");
-});
-
-requiredElement<HTMLButtonElement>("status-refresh").addEventListener("click", () => {
-  void refreshSystemStatus();
-});
-requiredElement<HTMLButtonElement>("scheduled-refresh").addEventListener("click", () => {
-  void refreshScheduledPosts();
-});
-document.querySelectorAll<HTMLButtonElement>("[data-post-filter]").forEach((button) => {
-  button.addEventListener("click", () => setPostFilter(button.dataset.postFilter as PostFilter));
-});
-requiredElement<HTMLButtonElement>("open-failed-posts").addEventListener("click", () => {
-  document.querySelector<HTMLButtonElement>('[data-view-target="scheduled-view"]')?.click();
-  setPostFilter("failed");
-});
-
-form.addEventListener("submit", async (event) => {
-  event.preventDefault();
-  const selected = selectedPlatforms();
-  if (selected.includes("tiktok") && tiktokConnected) {
-    await refreshTikTokCreatorInfo();
-    if (!tiktokCreatorInfo) {
-      showToast("TikTok creator settings could not be verified. Try again before submitting.", true);
-      return;
-    }
-  }
-  if (!validateForm()) return;
-
-  setBusy(true);
-  cancelRequested = false;
-  activeJobId = null;
-  currentPercent = 0;
-  uploadResult.hidden = true;
-  const jobId = crypto.randomUUID();
-  const platformErrors: string[] = [];
-
-  try {
-    setProgress("uploading", "Preparing a compatible cover...", 1);
-    const uploadThumbnail = await prepareThumbnailForPlatforms(thumbnailFile!, selected);
-    if (uploadThumbnail !== thumbnailFile) showPreparedThumbnail(uploadThumbnail);
-    throwIfCancelled();
-    setProgress("uploading", "Reserving capped temporary storage...", 3);
-    const reservation = await requestPresign(jobId, videoFile!, uploadThumbnail, selected);
-    throwIfCancelled();
-    const { video: videoUpload, thumbnail: thumbnailUpload } = reservation.uploads;
-
-    setProgress("uploading", "Staging files directly in R2...", 6);
-    const progress = { video: 0, thumbnail: 0 };
-    await Promise.all([
-      uploadDirectToR2(videoUpload.uploadUrl, videoFile!, (value) => {
-        progress.video = value;
-        setR2Progress(progress, uploadThumbnail);
-      }),
-      uploadDirectToR2(thumbnailUpload.uploadUrl, uploadThumbnail, (value) => {
-        progress.thumbnail = value;
-        setR2Progress(progress, uploadThumbnail);
-      }),
-    ]);
-    throwIfCancelled();
-
-    setProgress("uploading", "Creating provider upload job...", 48);
-    const job = buildJob(jobId, videoUpload.objectKey, thumbnailUpload.objectKey, uploadThumbnail);
-    const created = await apiRequest<CreateJobResponse>("/api/jobs", {
-      method: "POST",
-      body: JSON.stringify(job),
-    });
-    activeJobId = created.id;
-    throwIfCancelled();
-
-    if (selected.includes("youtube")) {
-      try {
-        await runYouTubeUpload(jobId, created);
-      } catch (error) {
-        if (cancelRequested) throw error;
-        platformErrors.push(`YouTube: ${errorMessage(error)}`);
-        await reportPlatformFailure(jobId, "youtube", errorMessage(error));
-      }
-    }
-    const publishImmediately = !job.scheduledAt || new Date(job.scheduledAt).getTime() <= Date.now();
-    if (selected.includes("instagram") && publishImmediately) {
-      try {
-        await runInstagramPublish(jobId);
-      } catch (error) {
-        if (cancelRequested) throw error;
-        platformErrors.push(`Instagram: ${errorMessage(error)}`);
-        await reportPlatformFailure(jobId, "instagram", errorMessage(error));
-      }
-    }
-    if (selected.includes("tiktok") && publishImmediately) {
-      try {
-        await runTikTokPublish(jobId);
-      } catch (error) {
-        if (cancelRequested) throw error;
-        platformErrors.push(`TikTok: ${errorMessage(error)}`);
-        await reportPlatformFailure(jobId, "tiktok", errorMessage(error));
-      }
-    }
-
-    const finalJob = await apiRequest<StoredJob>(`/api/jobs/${encodeURIComponent(jobId)}`);
-    showJobResult(finalJob, platformErrors);
-  } catch (error) {
-    const message = errorMessage(error);
-    const finalState: UploadState = cancelRequested ? "cancelled" : "failed";
-    setProgress(
-      finalState,
-      finalState === "cancelled" ? "Upload cancelled" : "Upload failed",
-      currentPercent,
-    );
-    if (activeJobId) await reportJobState(activeJobId, finalState, message);
-    showToast(
-      finalState === "cancelled"
-        ? "Upload cancelled. Temporary files remain covered by the 7-day cleanup fallback."
-        : `${message} Temporary files remain protected by 7-day cleanup.`,
-      finalState === "failed",
-    );
-  } finally {
-    setBusy(false);
-    activeJobId = null;
-    activeXhrs.clear();
-  }
-});
-
-function setupViewNavigation(): void {
+function setupNavigation(): void {
   document.querySelectorAll<HTMLButtonElement>("[data-view-target]").forEach((button) => {
     button.addEventListener("click", () => {
       const target = button.dataset.viewTarget;
-      document.querySelectorAll<HTMLElement>("[data-view]").forEach((view) => {
-        view.hidden = view.id !== target;
-      });
-      document.querySelectorAll<HTMLButtonElement>("[data-view-target]").forEach((item) => {
-        item.classList.toggle("is-active", item === button);
-      });
+      document.querySelectorAll<HTMLElement>("[data-view]").forEach((view) => { view.hidden = view.id !== target; });
+      document.querySelectorAll<HTMLButtonElement>("[data-view-target]").forEach((item) => item.classList.toggle("is-active", item === button));
+      if (target === "scheduled-view" || target === "history-view") void refreshPosts();
       if (target === "status-view") void refreshSystemStatus();
-      if (target === "scheduled-view") void refreshScheduledPosts();
     });
   });
 }
 
-function setupPlatformSelectionControls(): void {
-  document.querySelectorAll<HTMLElement>(".toggle-wrap").forEach((control) => {
-    control.addEventListener("click", (event) => event.stopPropagation());
-    control.addEventListener("keydown", (event) => event.stopPropagation());
+function setupConnections(): void {
+  document.querySelectorAll<HTMLButtonElement>("[data-connect]").forEach((button) => {
+    button.addEventListener("click", () => window.location.assign(`/api/oauth/${button.dataset.connect}/start`));
+  });
+}
+
+function setupDefaults(): void {
+  el<HTMLButtonElement>("platform-select-all").addEventListener("click", () => setDefaultPlatforms(true));
+  el<HTMLButtonElement>("platform-select-none").addEventListener("click", () => setDefaultPlatforms(false));
+  el<HTMLButtonElement>("apply-platforms-all").addEventListener("click", () => {
+    const selection = defaultPlatforms();
+    drafts.forEach((draft) => { draft.platforms = { ...selection }; });
+    renderDrafts();
   });
   for (const platform of PLATFORMS) {
-    platformToggleInputs[platform].addEventListener("change", () => {
-      applyPlatformSelection(
-        withPlatformSelection(platformSelection, platform, platformToggleInputs[platform].checked),
-      );
-    });
+    el<HTMLInputElement>(`default-${platform}`).addEventListener("change", updateDefaultSettingVisibility);
   }
-  syncPlatformSelectionControls();
+  el<HTMLButtonElement>("apply-defaults").addEventListener("click", () => {
+    applyDefaults(drafts);
+    renderDrafts();
+    showToast("Defaults applied to every draft.");
+  });
+  defaultSchedule.addEventListener("change", () => {
+    applySchedule(drafts, defaultSchedule.value, Number(el<HTMLSelectElement>("default-spacing").value));
+    renderDrafts();
+  });
+  el<HTMLSelectElement>("default-spacing").addEventListener("change", () => {
+    applySchedule(drafts, defaultSchedule.value, Number(el<HTMLSelectElement>("default-spacing").value));
+    renderDrafts();
+  });
+  updateDefaultSettingVisibility();
 }
 
-function setupDropzone(
-  dropzone: HTMLElement,
-  input: HTMLInputElement,
-  onFile: (file: File) => void,
-): void {
-  dropzone.addEventListener("click", () => input.click());
+function setupDropzone(): void {
+  dropzone.addEventListener("click", () => videoInput.click());
   dropzone.addEventListener("keydown", (event) => {
-    if (event.key === "Enter" || event.key === " ") {
-      event.preventDefault();
-      input.click();
-    }
+    if (event.key === "Enter" || event.key === " ") { event.preventDefault(); videoInput.click(); }
   });
-  input.addEventListener("change", () => {
-    const file = input.files?.[0];
-    if (file) onFile(file);
-  });
-  for (const eventName of ["dragenter", "dragover"]) {
-    dropzone.addEventListener(eventName, (event) => {
-      event.preventDefault();
-      dropzone.classList.add("is-dragging");
-    });
-  }
-  for (const eventName of ["dragleave", "drop"]) {
-    dropzone.addEventListener(eventName, (event) => {
-      event.preventDefault();
-      dropzone.classList.remove("is-dragging");
-    });
-  }
-  dropzone.addEventListener("drop", (event) => {
-    const file = event.dataTransfer?.files[0];
-    if (file) onFile(file);
-  });
+  videoInput.addEventListener("change", () => void addFiles([...videoInput.files ?? []]));
+  for (const name of ["dragenter", "dragover"]) dropzone.addEventListener(name, (event) => { event.preventDefault(); dropzone.classList.add("is-dragging"); });
+  for (const name of ["dragleave", "drop"]) dropzone.addEventListener(name, (event) => { event.preventDefault(); dropzone.classList.remove("is-dragging"); });
+  dropzone.addEventListener("drop", (event) => void addFiles([...event.dataTransfer?.files ?? []]));
 }
 
-function setVideo(file: File): void {
-  if (!(VIDEO_CONTENT_TYPES as readonly string[]).includes(file.type) || !file.name.toLowerCase().endsWith(".mp4")) {
-    showToast("Choose an MP4 video file.", true);
-    return;
-  }
-  if (file.size <= 0 || file.size > VIDEO_MAX_BYTES) {
-    showToast("The video must be between 1 byte and 2 GB.", true);
-    return;
-  }
-  videoFile = file;
-  videoDurationSeconds = 0;
-  requiredElement<HTMLElement>("video-name").textContent = file.name;
-  requiredElement<HTMLElement>("video-meta").textContent = `${formatBytes(file.size)} - reading duration...`;
-  videoDropzone.classList.add("has-file");
-  void readVideoDuration(file)
-    .then((duration) => {
-      if (videoFile !== file) return;
-      videoDurationSeconds = duration;
-      requiredElement<HTMLElement>("video-meta").textContent =
-        `${formatBytes(file.size)} - ${formatDuration(duration)} - MP4 ready`;
-    })
-    .catch(() => {
-      if (videoFile === file) {
-        requiredElement<HTMLElement>("video-meta").textContent = `${formatBytes(file.size)} - could not read duration`;
+function setupBatchActions(): void {
+  el<HTMLInputElement>("select-all-drafts").addEventListener("change", (event) => {
+    drafts.forEach((draft) => { draft.selected = (event.target as HTMLInputElement).checked; });
+    renderDrafts();
+  });
+  el<HTMLButtonElement>("delete-selected-drafts").addEventListener("click", () => {
+    for (let index = drafts.length - 1; index >= 0; index -= 1) {
+      if (drafts[index]?.selected && !drafts[index]?.createdJob) {
+        URL.revokeObjectURL(drafts[index]!.thumbnailUrl);
+        drafts.splice(index, 1);
       }
+    }
+    renderDrafts();
+  });
+  el<HTMLButtonElement>("apply-platforms-selected").addEventListener("click", () => {
+    openPlatformDialog(defaultPlatforms(), (selection, consent) => {
+      drafts.filter((draft) => draft.selected).forEach((draft) => {
+        draft.platforms = { ...selection };
+        draft.settings.tiktokConsent ||= consent;
+      });
+      renderDrafts();
     });
-}
-
-function setThumbnail(file: File): void {
-  if (!(THUMBNAIL_CONTENT_TYPES as readonly string[]).includes(file.type)) {
-    showToast("Choose a JPG, PNG, or WebP cover.", true);
-    return;
-  }
-  if (file.size <= 0 || file.size > THUMBNAIL_MAX_BYTES) {
-    showToast("The thumbnail must be between 1 byte and 10 MB.", true);
-    return;
-  }
-  thumbnailFile = file;
-  requiredElement<HTMLElement>("thumbnail-name").textContent = file.name;
-  requiredElement<HTMLElement>("thumbnail-meta").textContent = `${formatBytes(file.size)} - ready`;
-  thumbnailDropzone.classList.add("has-file");
-  if (thumbnailObjectUrl) URL.revokeObjectURL(thumbnailObjectUrl);
-  thumbnailObjectUrl = URL.createObjectURL(file);
-  requiredElement<HTMLElement>("thumbnail-preview").style.backgroundImage = `url("${thumbnailObjectUrl}")`;
-  requiredElement<HTMLElement>("thumbnail-preview").classList.add("has-image");
-}
-
-function showPreparedThumbnail(file: File): void {
-  requiredElement<HTMLElement>("thumbnail-name").textContent = file.name;
-  requiredElement<HTMLElement>("thumbnail-meta").textContent =
-    `${formatBytes(file.size)} - converted JPEG for selected platforms`;
-  if (thumbnailObjectUrl) URL.revokeObjectURL(thumbnailObjectUrl);
-  thumbnailObjectUrl = URL.createObjectURL(file);
-  requiredElement<HTMLElement>("thumbnail-preview").style.backgroundImage = `url("${thumbnailObjectUrl}")`;
-}
-
-function validateForm(): boolean {
-  const platforms = selectedPlatforms();
-  if (platforms.length === 0) {
-    showToast("Choose at least one destination.", true);
-    return false;
-  }
-  if (platforms.includes("youtube") && !youtubeConnected) {
-    showToast("Connect YouTube or turn it off for this post.", true);
-    youtubeConnect.focus();
-    return false;
-  }
-  if (platforms.includes("instagram") && !instagramConnected) {
-    showToast("Connect Instagram or turn it off for this post.", true);
-    instagramConnect.focus();
-    return false;
-  }
-  if (platforms.includes("tiktok") && !tiktokConnected) {
-    showToast("Connect TikTok or turn it off for this post.", true);
-    tiktokConnect.focus();
-    return false;
-  }
-  if (!videoFile) {
-    showToast("Choose an MP4 video first.", true);
-    videoDropzone.focus();
-    return false;
-  }
-  if (!thumbnailFile) {
-    showToast("Choose a thumbnail first.", true);
-    thumbnailDropzone.focus();
-    return false;
-  }
-  if (!videoDurationSeconds) {
-    showToast("Wait for the video duration to finish loading, or choose the MP4 again.", true);
-    return false;
-  }
-  if (platforms.includes("instagram")) {
-    if (videoFile.size > INSTAGRAM_VIDEO_MAX_BYTES) {
-      showToast("Instagram Reels API currently limits video files to 300 MB.", true);
-      return false;
-    }
-    if (videoDurationSeconds < 3 || videoDurationSeconds > 15 * 60) {
-      showToast("Instagram Reels must be between 3 seconds and 15 minutes.", true);
-      return false;
-    }
-  }
-  if (platforms.includes("tiktok")) {
-    if (!tiktokCreatorInfo) {
-      showToast("Wait for TikTok creator settings to load.", true);
-      void refreshTikTokCreatorInfo();
-      return false;
-    }
-    if (tiktokReviewStatus?.appRestriction === "unaudited" && !tiktokCreatorInfo.isPrivateAccount) {
-      showToast("TikTok public posting requires TikTok production approval.", true);
-      return false;
-    }
-    const privacy = tiktokPrivacy.value as TikTokPrivacy;
-    if (!privacy || !tiktokCreatorInfo.privacyLevelOptions.includes(privacy)) {
-      showToast("Choose one of the privacy options returned by TikTok.", true);
-      tiktokPrivacy.focus();
-      return false;
-    }
-    if (tiktokReviewStatus?.appRestriction === "unaudited" && privacy !== "SELF_ONLY") {
-      showToast("TikTok public posting requires TikTok production approval.", true);
-      return false;
-    }
-    if (tiktokPaidPartnership.checked && privacy === "SELF_ONLY") {
-      showToast("TikTok does not allow branded-content posts to use Only me privacy.", true);
-      return false;
-    }
-    if (videoDurationSeconds > tiktokCreatorInfo.maxVideoDurationSeconds) {
-      showToast(`This TikTok creator allows up to ${tiktokCreatorInfo.maxVideoDurationSeconds} seconds.`, true);
-      return false;
-    }
-    const coverTimestamp = Number(requiredElement<HTMLInputElement>("tiktok-cover-timestamp").value);
-    if (!Number.isSafeInteger(coverTimestamp) || coverTimestamp < 0 || coverTimestamp >= videoDurationSeconds * 1000) {
-      showToast("TikTok cover timestamp must be a whole millisecond inside the video.", true);
-      return false;
-    }
-    if (!tiktokDirectPostConsent.checked) {
-      showToast("Confirm that you want Social Uploader to send this video directly to TikTok.", true);
-      tiktokDirectPostConsent.focus();
-      return false;
-    }
-  }
-  if (!form.reportValidity()) return false;
-  const publishAt = scheduledAtInput.value ? new Date(scheduledAtInput.value) : null;
-  if (
-    platforms.includes("youtube") &&
-    (!publishAt || Number.isNaN(publishAt.getTime()) || publishAt.getTime() <= Date.now() + 60_000)
-  ) {
-    showToast("Choose a publish time at least one minute in the future.", true);
-    scheduledAtInput.focus();
-    return false;
-  }
-  return true;
-}
-
-function buildJob(jobId: string, videoKey: string, thumbnailKey: string, uploadThumbnail: File): DraftRequest {
-  const platforms = selectedPlatforms();
-  return {
-    id: jobId,
-    title: titleInput.value.trim(),
-    description: descriptionInput.value,
-    scheduledAt: scheduledAtInput.value ? new Date(scheduledAtInput.value).toISOString() : null,
-    timezone,
-    videoDurationSeconds,
-    platforms: {
-      youtube: platforms.includes("youtube"),
-      instagram: platforms.includes("instagram"),
-      tiktok: platforms.includes("tiktok"),
-    },
-    youtube: {
-      visibility: "public",
-      madeForKids: requiredElement<HTMLSelectElement>("youtube-made-for-kids").value === "true",
-    },
-    instagram: {
-      shareToFeed: requiredElement<HTMLInputElement>("instagram-share-to-feed").checked,
-    },
-    tiktok: {
-      privacy: (tiktokPrivacy.value || "SELF_ONLY") as TikTokPrivacy,
-      allowComments: requiredElement<HTMLInputElement>("tiktok-comments").checked,
-      allowDuet: requiredElement<HTMLInputElement>("tiktok-duet").checked,
-      allowStitch: requiredElement<HTMLInputElement>("tiktok-stitch").checked,
-      coverTimestampMs: Number(requiredElement<HTMLInputElement>("tiktok-cover-timestamp").value),
-      consentConfirmed: tiktokDirectPostConsent.checked,
-      promoteOwnBrand: tiktokPromoteOwnBrand.checked,
-      paidPartnership: tiktokPaidPartnership.checked,
-    },
-    assets: {
-      video: toAsset(videoKey, videoFile!),
-      thumbnail: toAsset(thumbnailKey, uploadThumbnail),
-    },
-  };
-}
-
-async function requestPresign(
-  jobId: string,
-  video: File,
-  thumbnail: File,
-  platforms: Platform[],
-): Promise<PresignResponse> {
-  const publishAt = scheduledAtInput.value ? new Date(scheduledAtInput.value) : null;
-  const retention =
-    publishAt && publishAt.getTime() > Date.now() &&
-    platforms.some((platform) => platform === "instagram" || platform === "tiktok")
-      ? "scheduled"
-      : "staging";
-  const payload: PresignRequest = {
-    jobId,
-    retention,
-    files: [
-      { kind: "video", fileName: video.name, contentType: video.type, size: video.size },
-      { kind: "thumbnail", fileName: thumbnail.name, contentType: thumbnail.type, size: thumbnail.size },
-    ],
-  };
-  return apiRequest<PresignResponse>("/api/uploads/presign", {
-    method: "POST",
-    body: JSON.stringify(payload),
+  });
+  el<HTMLButtonElement>("apply-schedule-selected").addEventListener("click", () => {
+    applySchedule(drafts.filter((draft) => draft.selected), defaultSchedule.value, Number(el<HTMLSelectElement>("default-spacing").value));
+    renderDrafts();
+  });
+  el<HTMLButtonElement>("submit-batch").addEventListener("click", () => void submitBatch());
+  el<HTMLButtonElement>("cancel-batch").addEventListener("click", () => {
+    batchCancelled = true;
+    for (const xhr of activeXhrs) xhr.abort();
+    drafts.filter((draft) => draft.createdJob && !["completed", "scheduled"].includes(draft.status)).forEach((draft) => {
+      draft.status = "cancelled";
+      void reportJobState(draft.id, "cancelled", "Batch cancelled by user.");
+    });
+    renderDrafts();
+  });
+  const dialog = el<HTMLDialogElement>("platform-dialog");
+  el<HTMLButtonElement>("platform-dialog-apply").addEventListener("click", (event) => {
+    event.preventDefault();
+    const selection = dialogSelection();
+    if (!PLATFORMS.some((platform) => selection[platform])) { showToast("Choose at least one platform.", true); return; }
+    platformDialogAction?.(selection, el<HTMLInputElement>("dialog-tiktok-consent").checked);
+    dialog.close();
   });
 }
 
-function uploadDirectToR2(url: string, file: File, onProgress: (value: number) => void): Promise<void> {
-  return uploadWithXhr(url, file, { "Content-Type": file.type }, onProgress, (xhr) => {
-    if (xhr.status < 200 || xhr.status >= 300) {
-      throw new Error(`R2 rejected ${file.name} (HTTP ${xhr.status}).`);
-    }
+function setupPostActions(): void {
+  document.querySelectorAll<HTMLButtonElement>(".refresh-posts").forEach((button) => button.addEventListener("click", () => void refreshPosts()));
+  el<HTMLInputElement>("select-all-scheduled").addEventListener("change", (event) => setPostChecks("scheduled-list", (event.target as HTMLInputElement).checked));
+  el<HTMLInputElement>("select-all-history").addEventListener("change", (event) => setPostChecks("history-list", (event.target as HTMLInputElement).checked));
+  el<HTMLButtonElement>("bulk-set-schedule").addEventListener("click", () => void bulkSetSchedule());
+  el<HTMLButtonElement>("bulk-shift-back").addEventListener("click", () => void bulkShift(-1));
+  el<HTMLButtonElement>("bulk-shift-forward").addEventListener("click", () => void bulkShift(1));
+  el<HTMLButtonElement>("bulk-change-platforms").addEventListener("click", () => {
+    openPlatformDialog(defaultPlatforms(), (selection, consent) => void bulkPatch(selectedPostIds("scheduled-list"), (post) => ({
+      platforms: selection,
+      tiktok: { ...post.tiktok, consentConfirmed: post.tiktok.consentConfirmed || consent },
+    })));
   });
+  el<HTMLButtonElement>("bulk-cancel").addEventListener("click", () => void bulkCancel());
+  el<HTMLButtonElement>("bulk-retry").addEventListener("click", () => void bulkRetry());
+  el<HTMLButtonElement>("status-refresh").addEventListener("click", () => void refreshSystemStatus());
 }
 
-async function uploadDirectToYouTube(
-  url: string,
-  accessToken: string,
-  file: File,
-  onProgress: (value: number) => void,
-): Promise<string> {
-  let videoId = "";
-  await uploadWithXhr(
-    url,
-    file,
-    { Authorization: `Bearer ${accessToken}`, "Content-Type": file.type },
-    onProgress,
-    (xhr) => {
-      const payload = parseJson(xhr.responseText) as { id?: string; error?: { message?: string } } | null;
-      if (xhr.status < 200 || xhr.status >= 300 || !payload?.id) {
-        throw new Error(payload?.error?.message ?? `YouTube upload failed (HTTP ${xhr.status}).`);
-      }
-      videoId = payload.id;
-    },
-  );
-  return videoId;
-}
+async function addFiles(files: File[]): Promise<void> {
+  const room = BATCH_MAX_POSTS - drafts.length;
+  const accepted = files.filter(isMp4).slice(0, room);
+  if (accepted.length !== files.length) showToast(`Only MP4 files are accepted; a batch is limited to ${BATCH_MAX_POSTS} posts.`, true);
+  const oversized = accepted.find((file) => file.size <= 0 || file.size > VIDEO_MAX_BYTES);
+  if (oversized) { showToast(`${oversized.name} must be between 1 byte and 2 GB.`, true); return; }
+  const total = drafts.reduce((sum, draft) => sum + draft.file.size + draft.thumbnail.size, 0) + accepted.reduce((sum, file) => sum + file.size, 0);
+  if (total > R2_STORAGE_CAP_BYTES) { showToast("This selection alone exceeds the 8 GB storage cap.", true); return; }
 
-async function runYouTubeUpload(jobId: string, created: CreateJobResponse): Promise<void> {
-  if (!created.youtube) throw new Error("The Worker did not return a YouTube upload session.");
-  setProgress("uploading", "Uploading video directly to YouTube...", 52);
-  const videoId = await uploadDirectToYouTube(
-    created.youtube.uploadUrl,
-    created.youtube.accessToken,
-    videoFile!,
-    (value) => setProgress("uploading", "Uploading video directly to YouTube...", 52 + Math.round(value * 12)),
-  );
-  throwIfCancelled();
-  setProgress("processing", "YouTube received the video; verifying its native schedule...", 65);
-  await apiRequest<CompleteYouTubeResponse>(
-    `/api/jobs/${encodeURIComponent(jobId)}/youtube/complete`,
-    { method: "POST", body: JSON.stringify({ videoId }) },
-  );
-}
-
-async function runInstagramPublish(jobId: string): Promise<void> {
-  setProgress("processing", "Instagram is fetching the Reel and cover from temporary storage...", 68);
-  let result = await apiRequest<InstagramPublishResponse>(
-    `/api/jobs/${encodeURIComponent(jobId)}/instagram/start`,
-    { method: "POST", body: "{}" },
-  );
-  for (let attempt = 0; result.status !== "published" && attempt < 5; attempt += 1) {
-    await delay(60_000);
-    throwIfCancelled();
-    setProgress("processing", `Instagram is processing the Reel (${attempt + 1}/5)...`, 68 + (attempt + 1) * 2);
-    result = await apiRequest<InstagramPublishResponse>(
-      `/api/jobs/${encodeURIComponent(jobId)}/instagram/status`,
-      { method: "POST", body: "{}" },
-    );
+  dropzone.classList.add("is-loading");
+  for (const file of accepted) {
+    try {
+      const media = await inspectVideo(file);
+      const name = baseName(file.name);
+      const index = drafts.length;
+      drafts.push({
+        id: crypto.randomUUID(), file, thumbnail: media.thumbnail,
+        thumbnailUrl: URL.createObjectURL(media.thumbnail), duration: media.duration,
+        title: applyTemplate(el<HTMLInputElement>("default-title").value, name).slice(0, 100) || name.slice(0, 100),
+        caption: applyTemplate(el<HTMLTextAreaElement>("default-caption").value, name).slice(0, 2200),
+        platforms: defaultPlatforms(), scheduledAt: calculatedSchedule(index), settings: defaultSettings(),
+        selected: true, status: "ready", progress: 0, createdJob: false,
+      });
+    } catch (error) { showToast(`${file.name}: ${message(error)}`, true); }
   }
-  if (result.status !== "published") {
-    showToast("Instagram is still processing. Its job remains visible in System status.");
+  dropzone.classList.remove("is-loading");
+  videoInput.value = "";
+  renderDrafts();
+}
+
+function renderDrafts(): void {
+  draftSection.hidden = drafts.length === 0;
+  draftList.replaceChildren();
+  drafts.forEach((draft) => draftList.append(renderDraft(draft)));
+  el<HTMLElement>("draft-count").textContent = `${drafts.length} ${drafts.length === 1 ? "draft" : "drafts"}`;
+  const incoming = drafts.reduce((sum, draft) => sum + draft.file.size + draft.thumbnail.size, 0);
+  el<HTMLElement>("incoming-total").textContent = `${formatBytes(incoming)} incoming`;
+  el<HTMLInputElement>("select-all-drafts").checked = drafts.length > 0 && drafts.every((draft) => draft.selected);
+  const preview = drafts.filter((draft) => draft.scheduledAt).map((draft) => `${draft.title}: ${formatDate(new Date(draft.scheduledAt).toISOString())}`);
+  el<HTMLElement>("schedule-preview").textContent = preview.length ? `Calculated schedule · ${preview.join(" · ")}` : "No calculated schedule. Instagram and TikTok publish immediately; YouTube requires a future time.";
+}
+
+function renderDraft(draft: BatchDraft): HTMLElement {
+  const row = document.createElement("article"); row.className = "queue-row"; row.dataset.status = draft.status;
+  const check = input("checkbox"); check.checked = draft.selected; check.disabled = draft.status !== "ready";
+  check.addEventListener("change", () => { draft.selected = check.checked; renderDrafts(); });
+  const select = wrap("div", "row-select", check);
+  const image = document.createElement("img"); image.src = draft.thumbnailUrl; image.alt = "";
+  const media = wrap("div", "media-cell", image, text("strong", draft.file.name), text("small", `${formatBytes(draft.file.size)} · ${formatDuration(draft.duration)}`));
+  const title = input("text"); title.value = draft.title; title.maxLength = 100; title.disabled = draft.status !== "ready";
+  title.addEventListener("input", () => { draft.title = title.value; });
+  const caption = document.createElement("textarea"); caption.value = draft.caption; caption.maxLength = 2200; caption.rows = 2; caption.disabled = draft.status !== "ready";
+  caption.addEventListener("input", () => { draft.caption = caption.value; });
+  const details = wrap("div", "details-cell", title, caption);
+  const platforms = wrap("div", "row-platforms");
+  for (const platform of PLATFORMS) {
+    const toggle = input("checkbox"); toggle.checked = draft.platforms[platform]; toggle.disabled = draft.status !== "ready";
+    toggle.addEventListener("change", () => { draft.platforms[platform] = toggle.checked; renderDrafts(); });
+    platforms.append(wrap("label", `mini-platform ${platform}`, toggle, text("span", LABELS[platform])));
   }
-}
-
-async function runTikTokPublish(jobId: string): Promise<void> {
-  setProgress("processing", `Querying TikTok creator settings and initializing ${privacyLabel(tiktokPrivacy.value)} Direct Post...`, 80);
-  const initialized = await apiRequest<TikTokStartResponse>(
-    `/api/jobs/${encodeURIComponent(jobId)}/tiktok/start`,
-    { method: "POST", body: "{}" },
-  );
-  setReviewDiagnostic("review-direct-post", true, "Initialized", "Not initialized yet");
-  setProgress("uploading", "Uploading the video to TikTok with FILE_UPLOAD...", 82);
-  await uploadDirectToTikTok(initialized, videoFile!, (value) => {
-    setProgress("uploading", "Uploading the video to TikTok with FILE_UPLOAD...", 82 + Math.round(value * 12));
-  });
-  throwIfCancelled();
-  await delay(2_000);
-  let status = await apiRequest<TikTokPublishStatusResponse>(
-    `/api/jobs/${encodeURIComponent(jobId)}/tiktok/uploaded`,
-    { method: "POST", body: "{}" },
-  );
-  for (let attempt = 0; !status.publishComplete && attempt < 60; attempt += 1) {
-    await delay(5_000);
-    throwIfCancelled();
-    setProgress("processing", "TikTok has the file and is processing the private post...", 95 + Math.min(3, attempt / 20));
-    status = await apiRequest<TikTokPublishStatusResponse>(
-      `/api/jobs/${encodeURIComponent(jobId)}/tiktok/status`,
-      { method: "POST", body: "{}" },
-    );
-  }
-  if (!status.publishComplete) {
-    showToast("TikTok is still processing. The uploaded file is already in TikTok custody.");
-  }
-}
-
-async function uploadDirectToTikTok(
-  initialized: TikTokStartResponse,
-  file: File,
-  onProgress: (value: number) => void,
-): Promise<void> {
-  for (let index = 0; index < initialized.totalChunkCount; index += 1) {
-    throwIfCancelled();
-    const start = index * initialized.chunkSize;
-    const end = index === initialized.totalChunkCount - 1
-      ? file.size
-      : Math.min(file.size, start + initialized.chunkSize);
-    const chunk = file.slice(start, end, file.type);
-    await uploadTikTokChunk(initialized.uploadUrl, chunk, start, end, file.size, index, initialized.totalChunkCount);
-    onProgress(end / file.size);
-  }
-}
-
-function uploadTikTokChunk(
-  url: string,
-  chunk: Blob,
-  start: number,
-  end: number,
-  total: number,
-  index: number,
-  totalChunks: number,
-): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const xhr = new XMLHttpRequest();
-    activeXhrs.add(xhr);
-    xhr.open("PUT", url);
-    xhr.setRequestHeader("Content-Type", "video/mp4");
-    xhr.setRequestHeader("Content-Range", `bytes ${start}-${end - 1}/${total}`);
-    xhr.addEventListener("load", () => {
-      activeXhrs.delete(xhr);
-      const expected = index === totalChunks - 1 ? 201 : 206;
-      if (xhr.status !== expected) {
-        reject(new Error(`TikTok rejected FILE_UPLOAD chunk ${index + 1}/${totalChunks} (HTTP ${xhr.status}).`));
-        return;
-      }
-      resolve();
-    });
-    xhr.addEventListener("error", () => {
-      activeXhrs.delete(xhr);
-      reject(new Error(`TikTok FILE_UPLOAD chunk ${index + 1}/${totalChunks} was interrupted.`));
-    });
-    xhr.addEventListener("abort", () => {
-      activeXhrs.delete(xhr);
-      reject(new Error("TikTok FILE_UPLOAD was cancelled."));
-    });
-    xhr.send(chunk);
-  });
-}
-
-function uploadWithXhr(
-  url: string,
-  file: File,
-  headers: Record<string, string>,
-  onProgress: (value: number) => void,
-  validate: (xhr: XMLHttpRequest) => void,
-): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const xhr = new XMLHttpRequest();
-    activeXhrs.add(xhr);
-    xhr.open("PUT", url);
-    for (const [name, value] of Object.entries(headers)) xhr.setRequestHeader(name, value);
-    xhr.upload.addEventListener("progress", (event) => {
-      if (event.lengthComputable) onProgress(event.loaded / event.total);
-    });
-    xhr.addEventListener("load", () => {
-      activeXhrs.delete(xhr);
-      try {
-        validate(xhr);
-        resolve();
-      } catch (error) {
-        reject(error);
-      }
-    });
-    xhr.addEventListener("error", () => {
-      activeXhrs.delete(xhr);
-      reject(new Error(`The upload of ${file.name} was interrupted.`));
-    });
-    xhr.addEventListener("abort", () => {
-      activeXhrs.delete(xhr);
-      reject(new Error(`Upload cancelled for ${file.name}.`));
-    });
-    xhr.send(file);
-  });
-}
-
-async function apiRequest<T>(path: string, init: RequestInit = {}): Promise<T> {
-  const headers = new Headers(init.headers);
-  if (init.body) headers.set("content-type", "application/json");
-  const response = await fetch(path, { ...init, headers });
-  const payload = (await response.json().catch(() => null)) as T | ApiError | null;
-  if (!response.ok) {
-    const message =
-      typeof payload === "object" && payload !== null && "error" in payload
-        ? String(payload.error)
-        : `Request failed (HTTP ${response.status}).`;
-    throw new Error(message);
-  }
-  return payload as T;
-}
-
-async function reportJobState(
-  jobId: string,
-  status: "failed" | "cancelled",
-  error: string,
-): Promise<void> {
-  try {
-    await apiRequest(`/api/jobs/${encodeURIComponent(jobId)}`, {
-      method: "POST",
-      body: JSON.stringify({ status, error }),
-    });
-  } catch {
-    // The visible state is still useful; backend logging is best effort after a client failure.
-  }
-}
-
-async function reportPlatformFailure(jobId: string, platform: Platform, error: string): Promise<void> {
-  try {
-    await apiRequest(`/api/jobs/${encodeURIComponent(jobId)}`, {
-      method: "POST",
-      body: JSON.stringify({ status: "failed", platform, error }),
-    });
-  } catch {
-    // Provider endpoints also persist terminal failures; this is a best-effort fallback.
-  }
-}
-
-function showJobResult(job: StoredJob, operationErrors: string[]): void {
-  const succeeded = Object.values(job.platformStatus ?? {}).some(
-    (status) => status === "scheduled" || status === "published",
-  );
-  const stillProcessing = Object.values(job.platformStatus ?? {}).some(
-    (status) => status === "uploading" || status === "processing" || status === "pending",
-  );
-  const pendingSchedule = Boolean(job.scheduledAt) && new Date(job.scheduledAt!).getTime() > Date.now() &&
-    Object.values(job.platformStatus ?? {}).some((status) => status === "pending" || status === "scheduled");
-  const state: UploadState = pendingSchedule ? "scheduled" : stillProcessing ? "processing" : succeeded && job.status !== "partial" ? "scheduled" : "failed";
-  const label = pendingSchedule
-    ? `Post scheduled for ${formatDate(job.scheduledAt!)}`
-    : stillProcessing
-      ? "Providers accepted the transfer; processing continues"
-    : job.status === "completed"
-      ? "All selected platforms accepted the post"
-      : succeeded
-        ? "Finished with platform errors"
-        : "All selected platforms failed";
-  setProgress(state, label, 100);
-
-  const results = requiredElement<HTMLElement>("result-platforms");
-  results.replaceChildren();
-  for (const platform of selectedPlatformsFromJob(job)) {
-    const row = document.createElement("span");
-    const status = job.platformStatus?.[platform] ?? "unknown";
-    if (platform === "youtube" && job.youtubeResult) {
-      row.textContent = `YouTube scheduled ${job.youtubeResult.videoId} for ${formatDate(job.youtubeResult.publishAt)}`;
-    } else if (platform === "instagram" && job.instagramResult?.mediaId) {
-      row.textContent = `Instagram published Reel ${job.instagramResult.mediaId}`;
-    } else if (platform === "tiktok" && job.tiktokResult) {
-      row.textContent = job.tiktokResult.status === "PUBLISH_COMPLETE"
-        ? `TikTok published ${job.tiktokResult.publishId} with ${privacyLabel(job.tiktok.privacy)} privacy`
-        : `TikTok ${job.tiktokResult.publishId}: ${humanizeStatus(job.tiktokResult.status)}`;
-    } else if (pendingSchedule && status === "pending") {
-      row.textContent = `${capitalize(platform)}: Social Uploader will send it at publish time`;
-    } else {
-      row.textContent = `${capitalize(platform)}: ${humanizeStatus(status)}`;
-    }
-    results.append(row);
-  }
-
-  requiredElement<HTMLElement>("result-cleanup").textContent = job.mediaDeleted
-    ? "Temporary video and thumbnail deleted"
-    : pendingSchedule
-      ? "Scheduled media retained until every selected platform is done"
-      : "Temporary media retained; 7-day staging cleanup remains active";
-  const warnings = [
-    ...(job.youtubeResult?.warnings ?? []),
-    ...(job.instagramResult?.warnings ?? []),
-    ...(job.tiktokResult?.warnings ?? []),
-    ...operationErrors,
-  ];
-  const warningElement = requiredElement<HTMLElement>("result-warnings");
-  warningElement.textContent = warnings.join(" ");
-  warningElement.hidden = warnings.length === 0;
-  uploadResult.hidden = false;
-  showToast(label, !succeeded && !stillProcessing);
-  resetForm();
-}
-
-async function refreshConnectionStatuses(): Promise<void> {
-  const [youtube, instagram, tiktok] = await Promise.allSettled([
-    apiRequest<YouTubeConnectionStatus>("/api/oauth/youtube/status"),
-    apiRequest<PlatformConnectionStatus>("/api/oauth/instagram/status"),
-    apiRequest<PlatformConnectionStatus>("/api/oauth/tiktok/status"),
-  ]);
-  if (youtube.status === "fulfilled") setYouTubeConnection(youtube.value.connected);
-  else {
-    setYouTubeConnection(false);
-    youtubeConnectionLabel.textContent = "Connection check failed";
-  }
-  if (instagram.status === "fulfilled") {
-    setInstagramConnection(
-      instagram.value.connected,
-      instagram.value.displayName,
-      instagram.value.requiresReconnect,
-      instagram.value.message,
-    );
-  } else {
-    setInstagramConnection(false);
-    instagramConnectionLabel.textContent = "Connection check failed";
-  }
-  if (tiktok.status === "fulfilled") {
-    setTikTokConnection(tiktok.value.connected, tiktok.value.displayName);
-  } else {
-    setTikTokConnection(false);
-    tiktokConnectionLabel.textContent = "Connection check failed";
-  }
-  await refreshTikTokCreatorInfo();
-}
-
-function setYouTubeConnection(connected: boolean): void {
-  youtubeConnected = connected;
-  youtubeConnectionLabel.textContent = connected ? "Connected" : "Not connected";
-  youtubeConnectionLabel.classList.toggle("is-connected", connected);
-  youtubeConnect.textContent = connected ? "Reconnect YouTube" : "Connect YouTube";
-  youtubeDisconnect.hidden = !connected;
-}
-
-function setInstagramConnection(
-  connected: boolean,
-  displayName?: string,
-  requiresReconnect = false,
-  message?: string,
-): void {
-  instagramConnected = connected;
-  instagramConnectionLabel.textContent = connected
-    ? displayName ?? "Connected"
-    : requiresReconnect
-      ? "Reconnect required"
-      : "Not connected";
-  instagramConnectionLabel.title = message ?? "";
-  instagramConnectionLabel.classList.toggle("is-connected", connected);
-  instagramConnect.textContent = connected || requiresReconnect ? "Reconnect Instagram" : "Connect Instagram";
-  instagramDisconnect.hidden = !connected && !requiresReconnect;
-}
-
-function setTikTokConnection(connected: boolean, displayName?: string): void {
-  tiktokConnected = connected;
-  tiktokConnectionLabel.textContent = connected ? displayName ?? "Connected" : "Not connected";
-  tiktokConnectionLabel.classList.toggle("is-connected", connected);
-  tiktokConnect.textContent = connected ? "Reconnect TikTok" : "Connect TikTok";
-  tiktokDisconnect.hidden = !connected;
-  if (!connected) {
-    tiktokCreatorInfo = null;
-    requiredElement<HTMLElement>("tiktok-creator-info").textContent = "Connect TikTok to load creator posting limits.";
-    resetTikTokPrivacyOptions();
-  }
-}
-
-async function disconnectPlatform(platform: "instagram" | "tiktok", button: HTMLButtonElement): Promise<void> {
-  button.disabled = true;
-  try {
-    await apiRequest(`/api/oauth/${platform}/disconnect`, { method: "POST", body: "{}" });
-    if (platform === "instagram") setInstagramConnection(false);
-    else setTikTokConnection(false);
-    showToast(`${capitalize(platform)} disconnected.`);
-  } catch (error) {
-    showToast(errorMessage(error), true);
-  } finally {
-    button.disabled = false;
-  }
-}
-
-async function refreshTikTokCreatorInfo(): Promise<void> {
-  try {
-    const review = await apiRequest<TikTokReviewStatus>("/api/tiktok/review-status");
-    tiktokReviewStatus = review;
-    renderTikTokReviewStatus(review);
-    const info = review.creatorInfo;
-    if (!info) {
-      tiktokCreatorInfo = null;
-      resetTikTokPrivacyOptions();
-      requiredElement<HTMLElement>("tiktok-creator-info").textContent = review.creatorInfoError ??
-        "Connect TikTok to load creator posting limits.";
-      return;
-    }
-    tiktokCreatorInfo = info;
-    configureTikTokPrivacy(info, review.appRestriction);
-    syncTikTokCommercialAvailability();
-    requiredElement<HTMLElement>("tiktok-creator-info").textContent =
-      `${info.nickname} (@${info.username}) · privacy: ${info.privacyLevelOptions.map(privacyLabel).join(", ")} · ` +
-      `comments ${info.commentDisabled ? "unavailable" : "available"}, Duet ${info.duetDisabled ? "unavailable" : "available"}, ` +
-      `Stitch ${info.stitchDisabled ? "unavailable" : "available"} · up to ${info.maxVideoDurationSeconds}s.`;
-    configureTikTokInteraction("tiktok-comments", info.commentDisabled);
-    configureTikTokInteraction("tiktok-duet", info.duetDisabled);
-    configureTikTokInteraction("tiktok-stitch", info.stitchDisabled);
-  } catch (error) {
-    tiktokCreatorInfo = null;
-    tiktokReviewStatus = null;
-    resetTikTokPrivacyOptions();
-    requiredElement<HTMLElement>("tiktok-creator-info").textContent = `Creator settings unavailable: ${errorMessage(error)}`;
-    renderTikTokReviewStatus(null);
-  }
-}
-
-function configureTikTokPrivacy(
-  info: TikTokCreatorInfo,
-  appRestriction: TikTokReviewStatus["appRestriction"],
-): void {
-  const previous = tiktokPrivacy.value;
-  tiktokPrivacy.replaceChildren();
-  const placeholder = document.createElement("option");
-  placeholder.value = "";
-  placeholder.textContent = "Choose privacy";
-  tiktokPrivacy.append(placeholder);
-  for (const value of info.privacyLevelOptions) {
-    const option = document.createElement("option");
-    option.value = value;
-    option.textContent = privacyLabel(value);
-    option.disabled = appRestriction === "unaudited" && value !== "SELF_ONLY";
-    if (option.disabled) option.textContent += " (requires production approval)";
-    tiktokPrivacy.append(option);
-  }
-  tiktokPrivacy.disabled = false;
-  tiktokPrivacy.value = info.privacyLevelOptions.includes(previous) &&
-    !(appRestriction === "unaudited" && previous !== "SELF_ONLY")
-    ? previous
-    : "";
-}
-
-function resetTikTokPrivacyOptions(): void {
-  tiktokPrivacy.replaceChildren();
-  const option = document.createElement("option");
-  option.value = "";
-  option.textContent = "Connect TikTok to load options";
-  tiktokPrivacy.append(option);
-  tiktokPrivacy.disabled = true;
-}
-
-function syncTikTokCommercialAvailability(): void {
-  const disabled = tiktokReviewStatus?.appRestriction === "unaudited" || tiktokPrivacy.value === "SELF_ONLY";
-  tiktokPaidPartnership.disabled = disabled;
-  tiktokPaidPartnership.title = disabled
-    ? "Branded content requires a non-private privacy option and TikTok production approval."
-    : "";
-  if (disabled) tiktokPaidPartnership.checked = false;
-}
-
-function renderTikTokReviewStatus(status: TikTokReviewStatus | null): void {
-  setReviewDiagnostic("review-login-kit", status?.loginKitConfigured, "Configured", "Not configured");
-  setReviewDiagnostic("review-video-publish", status?.videoPublishScopeGranted, "Granted", "Not granted");
-  setReviewDiagnostic("review-creator-info", status?.creatorInfoWorking, "Working", "Not verified");
-  setReviewDiagnostic("review-direct-post", status?.directPostInitialized, "Initialized", "Not initialized yet");
-  const restriction = requiredElement<HTMLElement>("review-app-restriction");
-  restriction.textContent = status
-    ? status.appRestriction === "approved" ? "Production approved" : "Unaudited"
-    : "Unavailable";
-  restriction.classList.toggle("is-ready", status?.appRestriction === "approved");
-}
-
-function setReviewDiagnostic(id: string, ready: boolean | undefined, readyText: string, pendingText: string): void {
-  const element = requiredElement<HTMLElement>(id);
-  element.textContent = ready === undefined ? "Unavailable" : ready ? readyText : pendingText;
-  element.classList.toggle("is-ready", ready === true);
-}
-
-function privacyLabel(value: string): string {
-  return ({
-    PUBLIC_TO_EVERYONE: "Everyone",
-    MUTUAL_FOLLOW_FRIENDS: "Friends",
-    FOLLOWER_OF_CREATOR: "Followers",
-    SELF_ONLY: "Only me",
-  } as Record<string, string>)[value] ?? value;
-}
-
-function configureTikTokInteraction(id: string, providerDisabled: boolean): void {
-  const input = requiredElement<HTMLInputElement>(id);
-  input.disabled = providerDisabled;
-  if (providerDisabled) input.checked = false;
-}
-
-async function refreshScheduledPosts(): Promise<void> {
-  const refresh = requiredElement<HTMLButtonElement>("scheduled-refresh");
-  refresh.disabled = true;
-  refresh.textContent = "Refreshing...";
-  try {
-    const response = await apiRequest<ScheduledPostsResponse>("/api/scheduled-posts");
-    postsCache = response.posts;
-    if (tiktokConnected && postsCache.some((post) => post.platformStatus.tiktok === "failed")) {
-      await refreshTikTokCreatorInfo();
-    }
-    renderScheduledPosts();
-  } catch (error) {
-    showToast(errorMessage(error), true);
-  } finally {
-    refresh.disabled = false;
-    refresh.textContent = "Refresh";
-  }
-}
-
-function setPostFilter(filter: PostFilter): void {
-  activePostFilter = filter;
-  document.querySelectorAll<HTMLButtonElement>("[data-post-filter]").forEach((button) => {
-    const selected = button.dataset.postFilter === filter;
-    button.classList.toggle("is-active", selected);
-    button.setAttribute("aria-pressed", String(selected));
-  });
-  renderScheduledPosts();
-}
-
-function renderScheduledPosts(): void {
-  const list = requiredElement<HTMLElement>("scheduled-posts-list");
-  list.replaceChildren();
-  const posts = postsCache.filter((post) => postCategory(post) === activePostFilter);
-  if (posts.length === 0) {
-    const empty = document.createElement("article");
-    empty.className = "panel empty-scheduled";
-    empty.textContent = {
-      upcoming: "No upcoming posts.",
-      failed: "No posts need attention.",
-      published: "No published posts yet.",
-      cancelled: "No cancelled posts.",
-    }[activePostFilter];
-    list.append(empty);
-    return;
-  }
-  for (const post of posts) list.append(createScheduledPostCard(post));
-}
-
-function createScheduledPostCard(post: ScheduledPostSummary): HTMLElement {
-  const card = document.createElement("article");
-  card.id = `post-${post.id}`;
-  card.className = `panel scheduled-card post-card-${postCategory(post)}`;
-
-  const imageWrap = document.createElement("div");
-  imageWrap.className = "scheduled-thumbnail-wrap";
-  if (post.thumbnailUrl) {
-    const image = document.createElement("img");
-    image.className = "scheduled-thumbnail";
-    image.src = post.thumbnailUrl;
-    image.alt = "";
-    image.addEventListener("error", () => imageWrap.classList.add("thumbnail-unavailable"), { once: true });
-    imageWrap.append(image);
-  } else {
-    imageWrap.classList.add("thumbnail-unavailable");
-  }
-
-  const content = document.createElement("div");
-  content.className = "scheduled-card-content";
-  const heading = document.createElement("div");
-  heading.className = "scheduled-card-heading";
-  const text = document.createElement("div");
-  const title = document.createElement("h2");
-  title.textContent = post.title;
-  const caption = document.createElement("p");
-  caption.textContent = post.description || "No caption";
-  text.append(title, caption);
-  const actions = document.createElement("div");
-  actions.className = "connection-actions";
-  let edit: HTMLButtonElement | undefined;
-  if (post.canEdit) {
-    edit = document.createElement("button");
-    edit.type = "button";
-    edit.className = "connect-button compact-action";
-    edit.textContent = "Edit";
-    actions.append(edit);
-  }
-  if (post.canCancel) {
-    const cancel = document.createElement("button");
-    cancel.type = "button";
-    cancel.className = "text-button destructive-button compact-action";
-    cancel.textContent = "Cancel";
-    cancel.addEventListener("click", async () => {
-      if (!window.confirm(`Cancel “${post.title}” and delete its pending media? This cannot be undone.`)) return;
-      cancel.disabled = true;
-      try {
-        await apiRequest(`/api/jobs/${encodeURIComponent(post.id)}`, { method: "DELETE" });
-        showToast("Post cancelled and temporary media removed.");
-        await Promise.all([refreshScheduledPosts(), refreshSystemStatus()]);
-      } catch (error) {
-        showToast(errorMessage(error), true);
-        cancel.disabled = false;
-      }
-    });
-    actions.append(cancel);
-  }
-  heading.append(text, actions);
-
-  const meta = document.createElement("div");
-  meta.className = "scheduled-meta";
-  const schedule = document.createElement("span");
-  schedule.textContent = post.scheduledAt
-    ? `Scheduled ${formatDate(post.scheduledAt)}`
-    : `Created ${formatDate(post.createdAt)}`;
-  const size = document.createElement("span");
-  size.textContent = formatBytes(post.fileSizeBytes);
-  meta.append(schedule, size);
-
-  const platformList = document.createElement("div");
-  platformList.className = "post-platform-statuses";
-  for (const platform of selectedPlatformsFromSummary(post)) {
-    platformList.append(createPlatformDeliveryRow(post, platform));
-  }
-
-  content.append(heading, meta, platformList);
-  if (postCategory(post) === "failed") {
-    const retention = document.createElement("p");
-    retention.className = `retention-note ${post.sourceMediaAvailable ? "" : "source-expired"}`;
-    retention.textContent = post.sourceMediaAvailable && post.mediaExpiresAt
-      ? `Source retained for retry until ${formatDate(post.mediaExpiresAt)}`
-      : "Source expired — upload again";
-    content.append(retention);
-  }
-  if (edit) {
-    const editForm = createScheduledEditForm(post);
-    editForm.hidden = true;
-    edit.addEventListener("click", () => {
-      editForm.hidden = !editForm.hidden;
-      edit!.textContent = editForm.hidden ? "Edit" : "Close edit";
-    });
-    content.append(editForm);
-  }
-  card.append(imageWrap, content);
-  return card;
-}
-
-function createPlatformDeliveryRow(post: ScheduledPostSummary, platform: Platform): HTMLElement {
-  const row = document.createElement("div");
-  row.className = "platform-delivery-row";
-  const icon = document.createElement("span");
-  icon.className = `platform-icon ${platform}`;
-  icon.textContent = platform === "youtube" ? "YT" : platform === "instagram" ? "IG" : "TT";
-  const copy = document.createElement("div");
-  const heading = document.createElement("div");
-  heading.className = "platform-delivery-heading";
-  const name = document.createElement("strong");
-  name.textContent = capitalize(platform);
-  const state = effectivePlatformState(post, platform);
-  const badge = document.createElement("span");
-  badge.className = `job-state delivery-${state}`;
-  badge.textContent = capitalize(state);
-  heading.append(name, badge);
-  copy.append(heading);
-  if (state === "failed") {
-    const error = document.createElement("p");
-    error.className = "platform-error-copy";
-    error.textContent = humanReadablePlatformError(platform, post.platformErrors[platform]);
-    error.title = post.platformErrors[platform] ?? "";
-    copy.append(error);
-  }
-  row.append(icon, copy);
-  const retry = retryActionFor(post, platform);
-  if (retry) row.append(retry);
+  const schedule = input("datetime-local"); schedule.value = draft.scheduledAt; schedule.min = defaultSchedule.min; schedule.disabled = draft.status !== "ready";
+  schedule.addEventListener("change", () => { draft.scheduledAt = schedule.value; renderDrafts(); });
+  const status = wrap("div", "status-cell", text("span", humanize(draft.status)));
+  if (draft.progress > 0 && draft.progress < 100) { const progress = document.createElement("progress"); progress.max = 100; progress.value = draft.progress; status.append(progress); }
+  if (draft.error) status.append(text("small", draft.error));
+  const actions = wrap("div", "row-actions");
+  const edit = document.createElement("details"); edit.className = "row-advanced"; edit.append(text("summary", "Edit"), renderDraftAdvanced(draft));
+  const remove = text("button", "Delete"); remove.className = "link-button danger-text"; (remove as HTMLButtonElement).type = "button"; (remove as HTMLButtonElement).disabled = draft.status !== "ready";
+  remove.addEventListener("click", () => { URL.revokeObjectURL(draft.thumbnailUrl); drafts.splice(drafts.indexOf(draft), 1); renderDrafts(); });
+  actions.append(edit, remove);
+  row.append(select, media, details, platforms, schedule, status, actions);
   return row;
 }
 
-function retryActionFor(post: ScheduledPostSummary, platform: Platform): HTMLElement | null {
-  if (post.platformStatus[platform] !== "failed" || !["instagram", "tiktok"].includes(platform)) return null;
-  if (!post.sourceMediaAvailable) return null;
-  const prerequisite = document.createElement("span");
-  prerequisite.className = "retry-prerequisite";
-  if (platform === "instagram" && !instagramConnected) {
-    prerequisite.textContent = "Reconnect Instagram to retry";
-    return prerequisite;
+function renderDraftAdvanced(draft: BatchDraft): HTMLElement {
+  const panel = wrap("div", "row-advanced-panel");
+  if (draft.platforms.youtube) panel.append(settingCheckbox("YouTube · made for kids", draft.settings.youtubeMadeForKids, (v) => { draft.settings.youtubeMadeForKids = v; }));
+  if (draft.platforms.instagram) panel.append(settingCheckbox("Instagram · share to feed", draft.settings.instagramShareToFeed, (v) => { draft.settings.instagramShareToFeed = v; }));
+  if (draft.platforms.tiktok) {
+    const privacy = document.createElement("select");
+    const options = tiktokCreator?.privacyLevelOptions ?? [draft.settings.tiktokPrivacy];
+    for (const value of options) { const option = document.createElement("option"); option.value = value; option.textContent = privacyLabel(value); option.selected = value === draft.settings.tiktokPrivacy; privacy.append(option); }
+    privacy.addEventListener("change", () => { draft.settings.tiktokPrivacy = privacy.value as TikTokPrivacy; });
+    panel.append(wrap("label", "inline-setting", text("span", "TikTok privacy"), privacy));
+    panel.append(settingCheckbox("Comments", draft.settings.tiktokComments, (v) => { draft.settings.tiktokComments = v; }));
+    panel.append(settingCheckbox("Duet", draft.settings.tiktokDuet, (v) => { draft.settings.tiktokDuet = v; }));
+    panel.append(settingCheckbox("Stitch", draft.settings.tiktokStitch, (v) => { draft.settings.tiktokStitch = v; }));
+    panel.append(settingCheckbox("Direct Post consent", draft.settings.tiktokConsent, (v) => { draft.settings.tiktokConsent = v; }));
   }
-  if (platform === "tiktok") {
-    if (!tiktokConnected) {
-      prerequisite.textContent = "Reconnect TikTok to retry";
-      return prerequisite;
+  if (!panel.childElementCount) panel.append(text("span", "Select a platform to show its settings."));
+  return panel;
+}
+
+async function submitBatch(): Promise<void> {
+  const ready = drafts.filter((draft) => draft.status === "ready");
+  if (!ready.length || !validateDrafts(ready)) return;
+  batchCancelled = false;
+  setBatchBusy(true);
+  try {
+    ready.forEach((draft) => { draft.status = "preparing"; }); renderDrafts();
+    const request: BatchPresignRequest = { items: ready.map(presignInput) };
+    const reservation = await api<BatchPresignResponse>("/api/uploads/batch-presign", { method: "POST", body: JSON.stringify(request) });
+    const reservations = new Map(reservation.items.map((item) => [item.jobId, item.uploads]));
+    showToast(`Batch reserved. ${formatBytes(reservation.capacity.availableBytes)} remains under the 8 GB cap.`);
+    await mapLimit(ready, 2, async (draft) => processDraft(draft, reservations.get(draft.id)!));
+    const failed = ready.filter((draft) => draft.status === "failed").length;
+    showToast(failed ? `${ready.length - failed} posts accepted; ${failed} need attention.` : `${ready.length} posts accepted.`, failed > 0);
+    await refreshPosts();
+  } catch (error) {
+    ready.filter((draft) => draft.status === "preparing").forEach((draft) => { draft.status = batchCancelled ? "cancelled" : "failed"; draft.error = message(error); });
+    showToast(message(error), true);
+  } finally { setBatchBusy(false); renderDrafts(); }
+}
+
+async function processDraft(draft: BatchDraft, uploads: BatchPresignResponse["items"][number]["uploads"]): Promise<void> {
+  if (batchCancelled) return;
+  try {
+    draft.status = "uploading"; renderDrafts();
+    await upload(uploads.video.uploadUrl, draft.file, (value) => { draft.progress = Math.round(value * 80); updateDraftStatus(draft); });
+    await upload(uploads.thumbnail.uploadUrl, draft.thumbnail, (value) => { draft.progress = 80 + Math.round(value * 5); updateDraftStatus(draft); });
+    if (batchCancelled) throw new Error("Batch cancelled.");
+    const job = buildJob(draft, uploads.video.objectKey, uploads.thumbnail.objectKey);
+    const created = await api<CreateJobResponse>("/api/jobs", { method: "POST", body: JSON.stringify(job) });
+    draft.createdJob = true; draft.status = "processing"; draft.progress = 88; updateDraftStatus(draft);
+    if (draft.platforms.youtube) await publishYouTube(draft, created);
+    const immediate = !draft.scheduledAt || new Date(draft.scheduledAt).getTime() <= Date.now();
+    if (draft.platforms.instagram && immediate) await api<InstagramPublishResponse>(`/api/jobs/${draft.id}/instagram/start`, { method: "POST", body: "{}" });
+    if (draft.platforms.tiktok && immediate) await publishTikTok(draft);
+    draft.progress = 100;
+    draft.status = draft.scheduledAt && new Date(draft.scheduledAt).getTime() > Date.now()
+      ? "scheduled"
+      : draft.platforms.instagram || draft.platforms.tiktok ? "processing" : "completed";
+  } catch (error) {
+    draft.status = batchCancelled ? "cancelled" : "failed"; draft.error = message(error);
+    if (draft.createdJob) await reportJobState(draft.id, batchCancelled ? "cancelled" : "failed", draft.error);
+  }
+  renderDrafts();
+}
+
+async function publishYouTube(draft: BatchDraft, created: CreateJobResponse): Promise<void> {
+  if (!created.youtube) throw new Error("YouTube did not return an upload session.");
+  const videoId = await uploadYouTube(created.youtube.uploadUrl, created.youtube.accessToken, draft.file, (value) => { draft.progress = 88 + Math.round(value * 8); updateDraftStatus(draft); });
+  await api<CompleteYouTubeResponse>(`/api/jobs/${draft.id}/youtube/complete`, { method: "POST", body: JSON.stringify({ videoId }) });
+}
+
+async function publishTikTok(draft: BatchDraft): Promise<void> {
+  const initialized = await api<TikTokStartResponse>(`/api/jobs/${draft.id}/tiktok/start`, { method: "POST", body: "{}" });
+  for (let index = 0; index < initialized.totalChunkCount; index += 1) {
+    const start = index * initialized.chunkSize;
+    const end = index === initialized.totalChunkCount - 1 ? draft.file.size : Math.min(draft.file.size, start + initialized.chunkSize);
+    await uploadTikTokChunk(initialized.uploadUrl, draft.file.slice(start, end, draft.file.type), start, end, draft.file.size, index === initialized.totalChunkCount - 1);
+  }
+  await api<TikTokPublishStatusResponse>(`/api/jobs/${draft.id}/tiktok/uploaded`, { method: "POST", body: "{}" });
+}
+
+function validateDrafts(items: BatchDraft[]): boolean {
+  const seenConnections = new Set<Platform>();
+  for (const draft of items) {
+    const selected = PLATFORMS.filter((platform) => draft.platforms[platform]);
+    if (!draft.title.trim()) return invalid(`${draft.file.name} needs a title.`);
+    if (!selected.length) return invalid(`${draft.file.name} needs at least one platform.`);
+    for (const platform of selected) if (!connected[platform]) seenConnections.add(platform);
+    if (draft.platforms.instagram && (draft.file.size > INSTAGRAM_VIDEO_MAX_BYTES || draft.duration < 3 || draft.duration > 900)) return invalid(`${draft.file.name} does not meet Instagram's 300 MB and 3 sec–15 min limits.`);
+    if (draft.platforms.youtube && (!draft.scheduledAt || new Date(draft.scheduledAt).getTime() <= Date.now() + 60_000)) return invalid(`${draft.file.name} needs a YouTube schedule at least one minute in the future.`);
+    if (draft.scheduledAt && Number.isNaN(new Date(draft.scheduledAt).getTime())) return invalid(`${draft.file.name} has an invalid schedule.`);
+    if (draft.platforms.tiktok) {
+      if (!tiktokCreator) return invalid("TikTok creator settings are not available.");
+      if (!draft.settings.tiktokConsent) return invalid(`${draft.file.name} needs TikTok Direct Post consent.`);
+      if (draft.duration > tiktokCreator.maxVideoDurationSeconds) return invalid(`${draft.file.name} exceeds this TikTok creator's duration limit.`);
+      if (tiktokReview?.appRestriction === "unaudited" && draft.settings.tiktokPrivacy !== "SELF_ONLY") return invalid("TikTok review mode only allows Only me privacy.");
     }
-    if (tiktokReviewStatus?.appRestriction === "unaudited" && !tiktokCreatorInfo?.isPrivateAccount) {
-      prerequisite.textContent = tiktokCreatorInfo
-        ? "TikTok public posting requires TikTok production approval."
-        : "Checking TikTok prerequisites…";
-      return prerequisite;
-    }
   }
-  const button = document.createElement("button");
-  button.type = "button";
-  button.className = "connect-button retry-button";
-  button.textContent = `Retry ${capitalize(platform)}`;
-  button.addEventListener("click", async () => {
-    button.disabled = true;
-    try {
-      await apiRequest(`/api/jobs/${encodeURIComponent(post.id)}/retry/${platform}`, {
-        method: "POST",
-        body: "{}",
-      });
-      showToast(`${capitalize(platform)} retry queued. Other platforms will not be reposted.`);
-      await Promise.all([refreshScheduledPosts(), refreshSystemStatus()]);
-    } catch (error) {
-      showToast(errorMessage(error), true);
-      button.disabled = false;
-    }
-  });
-  return button;
+  if (seenConnections.size) return invalid(`Connect ${[...seenConnections].map(capitalize).join(", ")} before uploading.`);
+  return true;
 }
 
-function postCategory(post: ScheduledPostSummary): PostFilter {
-  if (post.status === "cancelled") return "cancelled";
-  if (post.status === "failed" || post.status === "partial") return "failed";
-  if (selectedPlatformsFromSummary(post).some((platform) => post.platformStatus[platform] === "failed")) return "failed";
-  if (selectedPlatformsFromSummary(post).some((platform) =>
-    ["pending", "publishing"].includes(effectivePlatformState(post, platform)))) return "upcoming";
-  return "published";
+function invalid(value: string): false { showToast(value, true); return false; }
+
+function presignInput(draft: BatchDraft): PresignRequest {
+  const future = draft.scheduledAt && new Date(draft.scheduledAt).getTime() > Date.now();
+  return { jobId: draft.id, retention: future && (draft.platforms.instagram || draft.platforms.tiktok) ? "scheduled" : "staging", files: [
+    { kind: "video", fileName: draft.file.name, contentType: "video/mp4", size: draft.file.size },
+    { kind: "thumbnail", fileName: draft.thumbnail.name, contentType: draft.thumbnail.type, size: draft.thumbnail.size },
+  ] };
 }
 
-function effectivePlatformState(
-  post: ScheduledPostSummary,
-  platform: Platform,
-): "pending" | "publishing" | "published" | "failed" | "cancelled" {
-  const state = post.platformStatus[platform] ?? "pending";
-  if (state === "failed" || state === "cancelled" || state === "published") return state;
-  if (state === "uploading" || state === "processing") return "publishing";
-  if (state === "scheduled") {
-    return post.scheduledAt && new Date(post.scheduledAt).getTime() > Date.now() ? "pending" : "published";
-  }
-  return "pending";
-}
-
-function humanReadablePlatformError(platform: Platform, error?: string): string {
-  if (!error) return `${capitalize(platform)} delivery failed.`;
-  if (
-    error.includes("unaudited_client_can_only_post_to_private_accounts") ||
-    error.includes("must be switched to Private") ||
-    error.includes("production approval")
-  ) {
-    return "TikTok public posting requires TikTok production approval";
-  }
-  if (error.includes("scope_not_authorized") || error.includes("video.publish")) {
-    return "TikTok publishing permission is missing";
-  }
-  if (error.toLowerCase().includes("token") && error.toLowerCase().includes("expired")) {
-    return `${capitalize(platform)} connection expired`;
-  }
-  const firstSentence = error.split(/(?<=[.!?])\s/u)[0] ?? error;
-  return firstSentence.length > 150 ? `${firstSentence.slice(0, 147)}…` : firstSentence;
-}
-
-function createScheduledEditForm(post: ScheduledPostSummary): HTMLFormElement {
-  const editForm = document.createElement("form");
-  editForm.className = "scheduled-edit-form";
-
-  const title = editTextInput("Title", post.title, 100);
-  const description = document.createElement("textarea");
-  description.value = post.description;
-  description.maxLength = 2200;
-  description.rows = 4;
-  const descriptionField = fieldWithControl("Caption / description", description);
-  const schedule = editTextInput("Publish date and time", toLocalDateTime(post.scheduledAt!));
-  schedule.input.type = "datetime-local";
-  schedule.input.required = true;
-  schedule.input.min = scheduledAtInput.min;
-
-  const platformGroup = document.createElement("fieldset");
-  platformGroup.className = "scheduled-platforms";
-  const legend = document.createElement("legend");
-  legend.textContent = "Destinations";
-  platformGroup.append(legend);
-  const platformInputs = {} as Record<Platform, HTMLInputElement>;
-  for (const platform of ["youtube", "instagram", "tiktok"] as Platform[]) {
-    const checkbox = document.createElement("input");
-    checkbox.type = "checkbox";
-    checkbox.checked = post.platforms[platform];
-    checkbox.disabled = !post.platforms[platform] && !post.sourceMediaAvailable;
-    platformInputs[platform] = checkbox;
-    const label = document.createElement("label");
-    label.className = "check-field";
-    const copy = document.createElement("span");
-    copy.textContent = capitalize(platform);
-    label.append(checkbox, copy);
-    platformGroup.append(label);
-  }
-
-  const madeForKids = checkboxControl("YouTube: made for kids", post.youtube.madeForKids);
-  const shareToFeed = checkboxControl("Instagram: also share to feed", post.instagram.shareToFeed);
-  const comments = checkboxControl("TikTok: allow comments", post.tiktok.allowComments);
-  const duet = checkboxControl("TikTok: allow Duet", post.tiktok.allowDuet);
-  const stitch = checkboxControl("TikTok: allow Stitch", post.tiktok.allowStitch);
-  const cover = editTextInput("TikTok cover frame (ms)", String(post.tiktok.coverTimestampMs));
-  cover.input.type = "number";
-  cover.input.min = "0";
-  cover.input.step = "1";
-  const consent = checkboxControl(
-    "I consent to Social Uploader sending this scheduled video and caption directly to TikTok",
-    post.tiktok.consentConfirmed === true,
-  );
-  const youtubeSettings = groupedSettings("YouTube settings", madeForKids.label);
-  const instagramSettings = groupedSettings("Instagram settings", shareToFeed.label);
-  const tiktokNote = document.createElement("p");
-  tiktokNote.className = "settings-note restriction-note";
-  tiktokNote.textContent = "TikTok public posting requires TikTok production approval.";
-  const tiktokSettings = groupedSettings(
-    "TikTok settings",
-    comments.label,
-    duet.label,
-    stitch.label,
-    cover.field,
-    consent.label,
-    tiktokNote,
-  );
-  const syncSettingGroups = () => {
-    youtubeSettings.hidden = !platformInputs.youtube.checked;
-    instagramSettings.hidden = !platformInputs.instagram.checked;
-    tiktokSettings.hidden = !platformInputs.tiktok.checked;
+function buildJob(draft: BatchDraft, videoKey: string, thumbnailKey: string): DraftRequest {
+  return {
+    id: draft.id, title: draft.title.trim(), description: draft.caption,
+    scheduledAt: draft.scheduledAt ? new Date(draft.scheduledAt).toISOString() : null,
+    timezone, videoDurationSeconds: draft.duration, platforms: draft.platforms,
+    youtube: { visibility: "public", madeForKids: draft.settings.youtubeMadeForKids },
+    instagram: { shareToFeed: draft.settings.instagramShareToFeed },
+    tiktok: {
+      privacy: draft.settings.tiktokPrivacy, allowComments: draft.settings.tiktokComments,
+      allowDuet: draft.settings.tiktokDuet, allowStitch: draft.settings.tiktokStitch,
+      coverTimestampMs: 0, consentConfirmed: draft.settings.tiktokConsent,
+      promoteOwnBrand: draft.settings.tiktokPromoteOwnBrand, paidPartnership: draft.settings.tiktokPaidPartnership,
+    },
+    assets: {
+      video: { key: videoKey, originalName: draft.file.name, contentType: "video/mp4", size: draft.file.size },
+      thumbnail: { key: thumbnailKey, originalName: draft.thumbnail.name, contentType: draft.thumbnail.type, size: draft.thumbnail.size },
+    },
   };
-  for (const input of Object.values(platformInputs)) input.addEventListener("change", syncSettingGroups);
-  syncSettingGroups();
-
-  const thumbnail = document.createElement("input");
-  thumbnail.type = "file";
-  thumbnail.accept = "image/jpeg,image/png,image/webp,.jpg,.jpeg,.png,.webp";
-  const thumbnailField = fieldWithControl("Replacement thumbnail / cover (optional)", thumbnail);
-  const note = document.createElement("p");
-  note.className = "settings-note";
-  note.textContent = post.sourceMediaAvailable
-    ? "YouTube changes are synchronized now. Instagram/TikTok changes remain pending until dispatch."
-    : "The source video was already released; existing destinations can be edited, but another platform cannot be added.";
-  const save = document.createElement("button");
-  save.type = "submit";
-  save.className = "primary-button compact-button";
-  save.textContent = "Save changes";
-
-  editForm.append(
-    title.field,
-    descriptionField,
-    schedule.field,
-    platformGroup,
-    youtubeSettings,
-    instagramSettings,
-    tiktokSettings,
-    thumbnailField,
-    note,
-    save,
-  );
-
-  editForm.addEventListener("submit", async (event) => {
-    event.preventDefault();
-    const selected = (["youtube", "instagram", "tiktok"] as Platform[]).filter(
-      (platform) => platformInputs[platform].checked,
-    );
-    if (selected.length === 0) {
-      showToast("Keep at least one destination, or cancel the post.", true);
-      return;
-    }
-    if (selected.includes("tiktok") && !consent.input.checked) {
-      showToast("Confirm consent before scheduling a TikTok Direct Post.", true);
-      consent.input.focus();
-      return;
-    }
-    if (
-      selected.includes("tiktok") &&
-      tiktokReviewStatus?.appRestriction === "unaudited" &&
-      !tiktokCreatorInfo?.isPrivateAccount
-    ) {
-      showToast("TikTok public posting requires TikTok production approval.", true);
-      return;
-    }
-    save.disabled = true;
-    try {
-      const replacement = thumbnail.files?.[0];
-      if (replacement) {
-        const preparedReplacement = await prepareThumbnailForPlatforms(replacement, selected);
-        await uploadScheduledThumbnail(post.id, preparedReplacement);
-      }
-      const input: EditScheduledPostRequest = {
-        title: title.input.value.trim(),
-        description: description.value,
-        scheduledAt: new Date(schedule.input.value).toISOString(),
-        platforms: {
-          youtube: platformInputs.youtube.checked,
-          instagram: platformInputs.instagram.checked,
-          tiktok: platformInputs.tiktok.checked,
-        },
-        youtube: { visibility: "public", madeForKids: madeForKids.input.checked },
-        instagram: { shareToFeed: shareToFeed.input.checked },
-        tiktok: {
-          privacy: post.tiktok.privacy,
-          allowComments: comments.input.checked,
-          allowDuet: duet.input.checked,
-          allowStitch: stitch.input.checked,
-          coverTimestampMs: Number(cover.input.value),
-          consentConfirmed: consent.input.checked,
-          promoteOwnBrand: post.tiktok.promoteOwnBrand === true,
-          paidPartnership: post.tiktok.paidPartnership === true,
-        },
-      };
-      await apiRequest(`/api/jobs/${encodeURIComponent(post.id)}`, {
-        method: "PATCH",
-        body: JSON.stringify(input),
-      });
-      showToast("Scheduled post updated.");
-      await Promise.all([refreshScheduledPosts(), refreshSystemStatus()]);
-    } catch (error) {
-      showToast(errorMessage(error), true);
-      save.disabled = false;
-    }
-  });
-  return editForm;
 }
 
-async function uploadScheduledThumbnail(jobId: string, file: File): Promise<void> {
-  const response = await fetch(`/api/jobs/${encodeURIComponent(jobId)}/thumbnail`, {
-    method: "PUT",
-    headers: { "content-type": file.type, "x-file-name": file.name },
-    body: file,
-  });
-  if (!response.ok) {
-    const payload = (await response.json().catch(() => null)) as ApiError | null;
-    throw new Error(payload?.error ?? `Thumbnail update failed (HTTP ${response.status}).`);
+async function refreshConnections(): Promise<void> {
+  const [youtube, instagram, tiktok] = await Promise.allSettled([
+    api<YouTubeConnectionStatus>("/api/oauth/youtube/status"), api<PlatformConnectionStatus>("/api/oauth/instagram/status"), api<PlatformConnectionStatus>("/api/oauth/tiktok/status"),
+  ]);
+  connected = { youtube: youtube.status === "fulfilled" && youtube.value.connected, instagram: instagram.status === "fulfilled" && instagram.value.connected, tiktok: tiktok.status === "fulfilled" && tiktok.value.connected };
+  setConnection("youtube", connected.youtube, youtube.status === "fulfilled" ? undefined : "Unavailable");
+  setConnection("instagram", connected.instagram, instagram.status === "fulfilled" ? instagram.value.displayName : "Unavailable");
+  setConnection("tiktok", connected.tiktok, tiktok.status === "fulfilled" ? tiktok.value.displayName : "Unavailable");
+  if (connected.tiktok) await refreshTikTokInfo();
+}
+
+async function refreshTikTokInfo(): Promise<void> {
+  try {
+    [tiktokCreator, tiktokReview] = await Promise.all([api<TikTokCreatorInfo>("/api/tiktok/creator-info"), api<TikTokReviewStatus>("/api/tiktok/review-status")]);
+    const privacy = el<HTMLSelectElement>("tiktok-privacy"); privacy.replaceChildren();
+    for (const value of tiktokCreator.privacyLevelOptions) { const option = document.createElement("option"); option.value = value; option.textContent = privacyLabel(value); privacy.append(option); }
+    if (tiktokReview.appRestriction === "unaudited" && tiktokCreator.privacyLevelOptions.includes("SELF_ONLY")) privacy.value = "SELF_ONLY";
+    privacy.disabled = false;
+    el<HTMLElement>("tiktok-creator-info").textContent = `${tiktokCreator.nickname} · up to ${formatDuration(tiktokCreator.maxVideoDurationSeconds)}${tiktokReview.appRestriction === "unaudited" ? " · review mode" : ""}`;
+  } catch (error) { el<HTMLElement>("tiktok-creator-info").textContent = message(error); }
+}
+
+function setConnection(platform: Platform, isConnected: boolean, detail?: string): void {
+  const label = el<HTMLElement>(`${platform}-connection-label`);
+  label.textContent = isConnected ? detail || "Connected" : detail || "Connect";
+  label.parentElement?.classList.toggle("is-connected", isConnected);
+}
+
+async function refreshPosts(): Promise<void> {
+  try { posts = (await api<ScheduledPostsResponse>("/api/scheduled-posts")).posts; renderPosts(); }
+  catch (error) { showToast(message(error), true); }
+}
+
+function renderPosts(): void {
+  const scheduled = posts.filter((post) => post.canEdit && post.scheduledAt && new Date(post.scheduledAt).getTime() > Date.now());
+  const history = posts.filter((post) => !scheduled.includes(post));
+  renderPostList("scheduled-list", scheduled, true);
+  renderPostList("history-list", history, false);
+}
+
+function renderPostList(id: string, values: ScheduledPostSummary[], editable: boolean): void {
+  const list = el<HTMLElement>(id); list.replaceChildren();
+  if (!values.length) { const empty = text("div", editable ? "No scheduled posts." : "No post history yet."); empty.className = "empty-row"; list.append(empty); return; }
+  for (const post of values) {
+    const row = document.createElement("article"); row.className = "post-row"; row.id = `post-${post.id}`;
+    const check = input("checkbox"); check.className = "post-check"; check.dataset.id = post.id;
+    const thumb = document.createElement("img"); thumb.src = post.thumbnailUrl; thumb.alt = ""; thumb.addEventListener("error", () => { thumb.hidden = true; });
+    const identity = wrap("div", "post-identity", thumb, wrap("div", "", text("strong", post.title), text("small", post.scheduledAt ? formatDate(post.scheduledAt) : formatDate(post.createdAt))));
+    const chips = wrap("div", "status-chips");
+    for (const platform of PLATFORMS) if (post.platforms[platform]) { const chip = text("span", `${LABELS[platform]} ${humanize(post.platformStatus[platform] ?? "pending")}`); chip.className = `chip ${post.platformStatus[platform] ?? "pending"}`; chips.append(chip); }
+    const state = text("span", humanize(post.status)); state.className = `post-state ${post.status}`;
+    const actions = wrap("div", "post-actions");
+    if (editable) {
+      const edit = text("button", "Edit") as HTMLButtonElement; edit.type = "button"; edit.addEventListener("click", () => togglePostEditor(row, post));
+      const cancel = text("button", "Cancel") as HTMLButtonElement; cancel.type = "button"; cancel.className = "danger-text"; cancel.addEventListener("click", () => void cancelPost(post.id));
+      actions.append(edit, cancel);
+    } else {
+      for (const platform of ["instagram", "tiktok"] as const) if (post.platformStatus[platform] === "failed") {
+        const retry = text("button", `Retry ${LABELS[platform]}`) as HTMLButtonElement; retry.type = "button"; retry.disabled = !post.sourceMediaAvailable; retry.addEventListener("click", () => void retryPost(post.id, platform)); actions.append(retry);
+      }
+    }
+    row.append(check, identity, chips, state, actions); list.append(row);
   }
 }
 
-function editTextInput(labelText: string, value: string, maxLength?: number): { field: HTMLLabelElement; input: HTMLInputElement } {
-  const input = document.createElement("input");
-  input.type = "text";
-  input.value = value;
-  input.required = true;
-  if (maxLength) input.maxLength = maxLength;
-  return { field: fieldWithControl(labelText, input), input };
+function togglePostEditor(row: HTMLElement, post: ScheduledPostSummary): void {
+  const existing = row.nextElementSibling;
+  if (existing?.classList.contains("post-editor")) { existing.remove(); return; }
+  const editor = wrap("form", "post-editor") as HTMLFormElement;
+  const title = input("text"); title.value = post.title; title.maxLength = 100;
+  const caption = document.createElement("textarea"); caption.value = post.description; caption.maxLength = 2200; caption.rows = 3;
+  const schedule = input("datetime-local"); schedule.value = toLocal(post.scheduledAt!); schedule.min = defaultSchedule.min;
+  const picks = wrap("div", "editor-platforms"); const inputs = {} as Record<Platform, HTMLInputElement>;
+  for (const platform of PLATFORMS) { const toggle = input("checkbox"); toggle.checked = post.platforms[platform]; inputs[platform] = toggle; picks.append(wrap("label", "", toggle, text("span", capitalize(platform)))); }
+  const save = text("button", "Save") as HTMLButtonElement; save.type = "submit"; save.className = "primary-button";
+  editor.append(field("Title", title), field("Caption", caption), field("Schedule", schedule), picks, save);
+  editor.addEventListener("submit", async (event) => {
+    event.preventDefault(); save.disabled = true;
+    try { await patchPost(post, { title: title.value.trim(), description: caption.value, scheduledAt: new Date(schedule.value).toISOString(), platforms: selectionFromInputs(inputs) }); showToast("Scheduled post updated."); await refreshPosts(); }
+    catch (error) { showToast(message(error), true); save.disabled = false; }
+  });
+  row.after(editor);
 }
 
-function fieldWithControl(labelText: string, control: HTMLElement): HTMLLabelElement {
-  const field = document.createElement("label");
-  field.className = "mini-field";
-  const label = document.createElement("span");
-  label.textContent = labelText;
-  field.append(label, control);
-  return field;
+async function bulkSetSchedule(): Promise<void> {
+  const ids = selectedPostIds("scheduled-list"); const start = el<HTMLInputElement>("bulk-schedule-time").value;
+  if (!ids.length || !start) { showToast("Select posts and choose a start time.", true); return; }
+  const spacing = Number(el<HTMLSelectElement>("bulk-schedule-spacing").value);
+  await bulkPatch(ids, (_post, index) => ({ scheduledAt: new Date(new Date(start).getTime() + spacing * 3_600_000 * index).toISOString() }));
 }
 
-function checkboxControl(labelText: string, checked: boolean): { label: HTMLLabelElement; input: HTMLInputElement } {
-  const input = document.createElement("input");
-  input.type = "checkbox";
-  input.checked = checked;
-  const label = document.createElement("label");
-  label.className = "check-field";
-  const copy = document.createElement("span");
-  copy.textContent = labelText;
-  label.append(input, copy);
-  return { label, input };
+async function bulkShift(direction: -1 | 1): Promise<void> {
+  const ids = selectedPostIds("scheduled-list");
+  const amount = Number(el<HTMLInputElement>("bulk-shift-amount").value); const unit = Number(el<HTMLSelectElement>("bulk-shift-unit").value);
+  if (!ids.length || !Number.isFinite(amount) || amount < 0) { showToast("Select posts and enter a valid shift.", true); return; }
+  await bulkPatch(ids, (post) => ({ scheduledAt: new Date(new Date(post.scheduledAt!).getTime() + direction * amount * unit * 3_600_000).toISOString() }));
 }
 
-function groupedSettings(labelText: string, ...controls: HTMLElement[]): HTMLFieldSetElement {
-  const group = document.createElement("fieldset");
-  group.className = "platform-settings-group";
-  const legend = document.createElement("legend");
-  legend.textContent = labelText;
-  group.append(legend, ...controls);
-  return group;
+async function bulkPatch(ids: string[], change: (post: ScheduledPostSummary, index: number) => Partial<EditScheduledPostRequest>): Promise<void> {
+  if (!ids.length) { showToast("Select at least one scheduled post.", true); return; }
+  const selected = ids.map((id) => posts.find((post) => post.id === id)).filter((post): post is ScheduledPostSummary => Boolean(post));
+  try {
+    await mapLimit(selected, 2, async (post, index) => { const update = change(post, index); await patchPost(post, update); });
+    showToast(`${selected.length} scheduled post${selected.length === 1 ? "" : "s"} updated.`); await refreshPosts();
+  } catch (error) { showToast(message(error), true); }
 }
 
-function selectedPlatformsFromSummary(post: ScheduledPostSummary): Platform[] {
-  return (Object.entries(post.platforms) as Array<[Platform, boolean]>)
-    .filter(([, enabled]) => enabled)
-    .map(([platform]) => platform);
+async function patchPost(post: ScheduledPostSummary, change: Partial<EditScheduledPostRequest>): Promise<void> {
+  const body: EditScheduledPostRequest = {
+    title: change.title ?? post.title, description: change.description ?? post.description,
+    scheduledAt: change.scheduledAt ?? post.scheduledAt!, platforms: change.platforms ?? post.platforms,
+    youtube: change.youtube ?? post.youtube, instagram: change.instagram ?? post.instagram,
+    tiktok: change.tiktok ?? post.tiktok,
+  };
+  await api(`/api/jobs/${post.id}`, { method: "PATCH", body: JSON.stringify(body) });
+}
+
+async function bulkCancel(): Promise<void> {
+  const ids = selectedPostIds("scheduled-list"); if (!ids.length) return void showToast("Select posts to cancel.", true);
+  try { await mapLimit(ids, 2, (id) => api(`/api/jobs/${id}`, { method: "DELETE" })); showToast(`${ids.length} scheduled post${ids.length === 1 ? "" : "s"} cancelled.`); await refreshPosts(); }
+  catch (error) { showToast(message(error), true); }
+}
+
+async function cancelPost(id: string): Promise<void> { try { await api(`/api/jobs/${id}`, { method: "DELETE" }); showToast("Scheduled post cancelled."); await refreshPosts(); } catch (error) { showToast(message(error), true); } }
+async function retryPost(id: string, platform: "instagram" | "tiktok"): Promise<void> { try { await api(`/api/jobs/${id}/retry/${platform}`, { method: "POST", body: "{}" }); showToast(`${capitalize(platform)} retry queued.`); await refreshPosts(); } catch (error) { showToast(message(error), true); } }
+async function bulkRetry(): Promise<void> {
+  const ids = selectedPostIds("history-list"); const tasks: Array<{ id: string; platform: "instagram" | "tiktok" }> = [];
+  for (const id of ids) { const post = posts.find((value) => value.id === id); if (!post) continue; for (const platform of ["instagram", "tiktok"] as const) if (post.platformStatus[platform] === "failed") tasks.push({ id, platform }); }
+  if (!tasks.length) return void showToast("Select history rows with a retryable failed Instagram or TikTok step.", true);
+  try { await mapLimit(tasks, 2, (task) => api(`/api/jobs/${task.id}/retry/${task.platform}`, { method: "POST", body: "{}" })); showToast(`${tasks.length} failed platform step${tasks.length === 1 ? "" : "s"} queued.`); await refreshPosts(); } catch (error) { showToast(message(error), true); }
 }
 
 async function refreshSystemStatus(): Promise<void> {
-  const refresh = requiredElement<HTMLButtonElement>("status-refresh");
-  refresh.disabled = true;
-  refresh.textContent = "Refreshing...";
   try {
-    const status = await apiRequest<SystemStatusResponse>("/api/system/status");
-    renderSystemStatus(status);
-  } catch (error) {
-    showToast(errorMessage(error), true);
-  } finally {
-    refresh.disabled = false;
-    refresh.textContent = "Refresh";
-  }
+    const status = await api<SystemStatusResponse>("/api/system/status");
+    el<HTMLElement>("storage-used").textContent = `${formatBytes(status.storage.usedBytes)} / 8 GB`;
+    el<HTMLElement>("storage-detail").textContent = `${status.storage.usedPercent.toFixed(2)}% · ${status.storage.temporaryObjectCount} objects`;
+    el<HTMLElement>("status-scheduled-count").textContent = String(status.scheduling.pendingCount);
+    el<HTMLElement>("status-next").textContent = status.scheduling.nextPublishAt ? `Next ${formatDate(status.scheduling.nextPublishAt)}` : "No upcoming post";
+    el<HTMLElement>("status-failed-count").textContent = String(status.scheduling.failedCount);
+    el<HTMLElement>("status-run").textContent = status.scheduling.recentRuns[0] ? `Last run ${formatDate(status.scheduling.recentRuns[0].finishedAt)}` : "No scheduler run";
+    const list = el<HTMLOListElement>("events-list"); list.replaceChildren();
+    for (const event of status.events.slice(0, 30)) list.append(wrap("li", `event ${event.level}`, wrap("div", "", text("strong", capitalize(event.platform ?? event.category)), text("time", formatDate(event.timestamp))), text("p", event.message)));
+    if (!list.childElementCount) list.append(text("li", "No recent events."));
+  } catch (error) { showToast(message(error), true); }
 }
 
-function renderSystemStatus(status: SystemStatusResponse): void {
-  requiredElement<HTMLElement>("status-generated-at").textContent = `Updated ${formatDate(status.generatedAt)}`;
-  requiredElement<HTMLElement>("storage-used").textContent = `${formatBytes(status.storage.usedBytes)} / 8 GB`;
-  requiredElement<HTMLElement>("storage-percent").textContent = `${status.storage.usedPercent.toFixed(2)}%`;
-  requiredElement<HTMLElement>("storage-bar").style.width = `${status.storage.usedPercent}%`;
-  requiredElement<HTMLElement>("storage-count").textContent = String(status.storage.temporaryObjectCount);
-  requiredElement<HTMLElement>("storage-oldest").textContent = status.storage.oldestTemporaryObject
-    ? `${formatDate(status.storage.oldestTemporaryObject.uploadedAt)} (${formatBytes(status.storage.oldestTemporaryObject.size)})`
-    : "None";
-
-  renderConnection("status-youtube", status.connections.youtube);
-  renderConnection("status-instagram", status.connections.instagram);
-  renderConnection("status-tiktok", status.connections.tiktok);
-  requiredElement<HTMLElement>("scheduled-count").textContent = String(status.scheduling.pendingCount);
-  requiredElement<HTMLElement>("next-scheduled-publish").textContent = status.scheduling.nextPublishAt
-    ? formatDate(status.scheduling.nextPublishAt)
-    : "None";
-  requiredElement<HTMLElement>("failed-posts-count").textContent = String(status.scheduling.failedCount);
-  const lastRun = status.scheduling.recentRuns[0];
-  requiredElement<HTMLElement>("last-scheduler-run").textContent = lastRun
-    ? formatDate(lastRun.finishedAt)
-    : "No runs yet";
-  requiredElement<HTMLElement>("last-scheduler-summary").textContent = lastRun
-    ? `${lastRun.processedPlatforms} steps · ${lastRun.succeeded} completed · ${lastRun.failed} errors`
-    : "No run loaded.";
-  renderSchedulerRuns(status);
-  renderPlatformErrors(status);
-  renderEvents(
-    "cleanup-list",
-    status.events.filter((event) => event.category === "cleanup" || event.category === "storage"),
-    "No recent storage cleanup events.",
-  );
+function applyDefaults(items: BatchDraft[]): void {
+  items.forEach((draft, index) => {
+    const name = baseName(draft.file.name); draft.title = applyTemplate(el<HTMLInputElement>("default-title").value, name).slice(0, 100) || name.slice(0, 100);
+    draft.caption = applyTemplate(el<HTMLTextAreaElement>("default-caption").value, name).slice(0, 2200);
+    draft.platforms = defaultPlatforms(); draft.settings = defaultSettings(); draft.scheduledAt = calculatedSchedule(index);
+  });
 }
 
-function renderSchedulerRuns(status: SystemStatusResponse): void {
-  const list = requiredElement<HTMLOListElement>("scheduler-runs-list");
-  list.replaceChildren();
-  if (status.scheduling.recentRuns.length === 0) {
-    const item = document.createElement("li");
-    item.className = "empty-event";
-    item.textContent = "No scheduler runs yet.";
-    list.append(item);
-    return;
-  }
-  for (const run of status.scheduling.recentRuns) {
-    const item = document.createElement("li");
-    item.className = `event-item ${run.failed ? "event-error" : "event-info"}`;
-    const heading = document.createElement("div");
-    const label = document.createElement("strong");
-    label.textContent = `${run.processedPlatforms} platform step(s)`;
-    const time = document.createElement("time");
-    time.dateTime = run.finishedAt;
-    time.textContent = formatDate(run.finishedAt);
-    heading.append(label, time);
-    const detail = document.createElement("p");
-    detail.textContent = `${run.dueJobs} due · ${run.succeeded} completed · ${run.failed} errors · ${run.deletedObjects} objects cleaned`;
-    item.append(heading, detail);
-    list.append(item);
-  }
+function applySchedule(items: BatchDraft[], start: string, spacingHours: number): void {
+  items.forEach((draft, index) => { draft.scheduledAt = start ? toLocal(new Date(new Date(start).getTime() + spacingHours * 3_600_000 * index).toISOString()) : ""; });
 }
 
-function renderConnection(id: string, connected: boolean): void {
-  const element = requiredElement<HTMLElement>(id);
-  element.textContent = connected ? "Connected" : "Not connected";
-  element.classList.toggle("is-connected", connected);
+function calculatedSchedule(index: number): string {
+  if (!defaultSchedule.value) return "";
+  return toLocal(new Date(new Date(defaultSchedule.value).getTime() + Number(el<HTMLSelectElement>("default-spacing").value) * 3_600_000 * index).toISOString());
 }
 
-function renderPlatformErrors(status: SystemStatusResponse): void {
-  const list = requiredElement<HTMLOListElement>("errors-list");
-  list.replaceChildren();
-  const errors = status.recentErrors.filter((event) => Boolean(event.platform));
-  if (errors.length === 0) {
-    const empty = document.createElement("li");
-    empty.className = "empty-event";
-    empty.textContent = "No recent platform errors.";
-    list.append(empty);
-    return;
-  }
-  const titles = new Map(status.jobs.map((job) => [job.id, job.title]));
-  for (const event of errors) {
-    const platform = event.platform!;
-    const item = document.createElement("li");
-    item.className = "event-item event-error platform-error-event";
-    const icon = document.createElement("span");
-    icon.className = `platform-icon ${platform}`;
-    icon.textContent = platform === "youtube" ? "YT" : platform === "instagram" ? "IG" : "TT";
-    const body = document.createElement("div");
-    body.className = "platform-error-body";
-    const heading = document.createElement("div");
-    const label = document.createElement("strong");
-    label.textContent = humanReadablePlatformError(platform, event.message);
-    const time = document.createElement("time");
-    time.dateTime = event.timestamp;
-    time.textContent = formatDate(event.timestamp);
-    heading.append(label, time);
-    body.append(heading);
-    if (event.jobId) {
-      const related = document.createElement("button");
-      related.type = "button";
-      related.className = "text-button related-post-button";
-      related.textContent = `${titles.get(event.jobId) ?? "Related post"} · ${event.jobId}`;
-      related.addEventListener("click", () => {
-        document.querySelector<HTMLButtonElement>('[data-view-target="scheduled-view"]')?.click();
-        setPostFilter("failed");
-        window.setTimeout(() => document.getElementById(`post-${event.jobId}`)?.scrollIntoView({ block: "center" }), 250);
-      });
-      body.append(related);
-    }
-    const technical = document.createElement("details");
-    const summary = document.createElement("summary");
-    summary.textContent = "Technical provider error";
-    const message = document.createElement("p");
-    message.textContent = event.message;
-    technical.append(summary, message);
-    body.append(technical);
-    item.append(icon, body);
-    list.append(item);
-  }
-}
+function defaultPlatforms(): Selection { return Object.fromEntries(PLATFORMS.map((platform) => [platform, el<HTMLInputElement>(`default-${platform}`).checked])) as Selection; }
+function defaultSettings(): Settings { return {
+  youtubeMadeForKids: el<HTMLInputElement>("youtube-made-for-kids").checked,
+  instagramShareToFeed: el<HTMLInputElement>("instagram-share-to-feed").checked,
+  tiktokPrivacy: el<HTMLSelectElement>("tiktok-privacy").value as TikTokPrivacy || "SELF_ONLY",
+  tiktokComments: el<HTMLInputElement>("tiktok-comments").checked, tiktokDuet: el<HTMLInputElement>("tiktok-duet").checked,
+  tiktokStitch: el<HTMLInputElement>("tiktok-stitch").checked, tiktokConsent: el<HTMLInputElement>("tiktok-direct-post-consent").checked,
+  tiktokPromoteOwnBrand: el<HTMLInputElement>("tiktok-promote-own-brand").checked, tiktokPaidPartnership: el<HTMLInputElement>("tiktok-paid-partnership").checked,
+}; }
 
-function renderEvents(
-  id: string,
-  events: SystemStatusResponse["events"],
-  emptyMessage: string,
-): void {
-  const list = requiredElement<HTMLOListElement>(id);
-  list.replaceChildren();
-  if (events.length === 0) {
-    const item = document.createElement("li");
-    item.className = "empty-event";
-    item.textContent = emptyMessage;
-    list.append(item);
-    return;
-  }
-  for (const event of events) {
-    const item = document.createElement("li");
-    item.className = `event-item event-${event.level}`;
-    const heading = document.createElement("div");
-    const category = document.createElement("strong");
-    category.textContent = event.platform ? capitalize(event.platform) : capitalize(event.category);
-    const time = document.createElement("time");
-    time.dateTime = event.timestamp;
-    time.textContent = formatDate(event.timestamp);
-    heading.append(category, time);
-    const message = document.createElement("p");
-    message.textContent = event.message;
-    item.append(heading, message);
-    list.append(item);
-  }
-}
+function setDefaultPlatforms(value: boolean): void { PLATFORMS.forEach((platform) => { el<HTMLInputElement>(`default-${platform}`).checked = value; }); updateDefaultSettingVisibility(); }
+function updateDefaultSettingVisibility(): void { PLATFORMS.forEach((platform) => { const section = document.getElementById(`${platform}-default-settings`); if (section) section.hidden = !el<HTMLInputElement>(`default-${platform}`).checked; }); }
+function openPlatformDialog(selection: Selection, action: (value: Selection, tiktokConsent: boolean) => void): void { PLATFORMS.forEach((platform) => { el<HTMLInputElement>(`dialog-${platform}`).checked = selection[platform]; }); el<HTMLInputElement>("dialog-tiktok-consent").checked = false; platformDialogAction = action; el<HTMLDialogElement>("platform-dialog").showModal(); }
+function dialogSelection(): Selection { return Object.fromEntries(PLATFORMS.map((platform) => [platform, el<HTMLInputElement>(`dialog-${platform}`).checked])) as Selection; }
 
-function showOAuthResult(): void {
-  const url = new URL(window.location.href);
-  const platform = (["youtube", "instagram", "tiktok"] as const).find((name) => url.searchParams.has(name));
-  if (!platform) return;
-  const result = url.searchParams.get(platform);
-  if (result === "connected") showToast(`${capitalize(platform)} connected securely.`);
-  else showToast(url.searchParams.get("message") ?? `${capitalize(platform)} connection failed.`, true);
-  url.searchParams.delete(platform);
-  url.searchParams.delete("message");
-  window.history.replaceState({}, "", `${url.pathname}${url.search}${url.hash}`);
-}
-
-function toAsset(key: string, file: File) {
-  return { key, originalName: file.name, contentType: file.type, size: file.size };
-}
-
-function setR2Progress(progress: { video: number; thumbnail: number }, uploadThumbnail: File): void {
-  const totalBytes = videoFile!.size + uploadThumbnail.size;
-  const uploadedBytes = videoFile!.size * progress.video + uploadThumbnail.size * progress.thumbnail;
-  setProgress("uploading", "Staging files directly in R2...", 6 + Math.round((uploadedBytes / totalBytes) * 40));
-}
-
-function setProgress(state: UploadState, label: string, percent: number): void {
-  currentPercent = Math.max(currentPercent, percent);
-  if (state === "failed" || state === "cancelled") currentPercent = percent;
-  uploadStatus.hidden = false;
-  statusState.textContent = capitalize(state);
-  statusState.className = `state-badge state-${state}`;
-  statusLabel.textContent = label;
-  statusPercent.textContent = `${Math.round(currentPercent)}%`;
-  progressBar.style.width = `${currentPercent}%`;
-  uploadStatus.dataset.state = state;
-  cancelButton.hidden = !["uploading"].includes(state);
-  cancelButton.disabled = state !== "uploading";
-}
-
-function setBusy(isBusy: boolean): void {
-  saveButton.disabled = isBusy;
-  form.setAttribute("aria-busy", String(isBusy));
-  saveButton.querySelector("span")!.textContent = isBusy ? "Working..." : "Upload & publish";
-  if (!isBusy) cancelButton.hidden = true;
-}
-
-function resetForm(): void {
-  form.reset();
-  platformSelection = selectionFromToggleInputs();
-  syncPlatformSelectionControls();
-  videoFile = null;
-  videoDurationSeconds = 0;
-  thumbnailFile = null;
-  videoDropzone.classList.remove("has-file");
-  thumbnailDropzone.classList.remove("has-file");
-  requiredElement<HTMLElement>("video-name").textContent = "Drop your MP4 here";
-  requiredElement<HTMLElement>("video-meta").textContent = "or click to choose a file - up to 2 GB";
-  requiredElement<HTMLElement>("thumbnail-name").textContent = "Choose a thumbnail";
-  requiredElement<HTMLElement>("thumbnail-meta").textContent = "JPG, PNG, or WebP - up to 10 MB";
-  requiredElement<HTMLElement>("thumbnail-preview").style.backgroundImage = "";
-  requiredElement<HTMLElement>("thumbnail-preview").classList.remove("has-image");
-  if (thumbnailObjectUrl) URL.revokeObjectURL(thumbnailObjectUrl);
-  thumbnailObjectUrl = null;
-  updateCount("title-count", 0);
-  updateCount("description-count", 0);
-  setScheduleMinimum();
-  updateScheduleRequirement();
-}
-
-function setScheduleMinimum(): void {
-  const minimum = new Date(Date.now() + 2 * 60 * 1000);
-  const local = new Date(minimum.getTime() - minimum.getTimezoneOffset() * 60_000)
-    .toISOString()
-    .slice(0, 16);
-  scheduledAtInput.min = local;
-}
-
-function updateScheduleRequirement(): void {
-  const youtubeEnabled = platformSelection.youtube;
-  scheduledAtInput.required = youtubeEnabled;
-  requiredElement<HTMLElement>("timezone-label").textContent = youtubeEnabled
-    ? `All selected platforms use this time (${timezone}); YouTube uses its native schedule`
-    : `Choose a future time (${timezone}), or leave blank to publish Instagram/TikTok now`;
-}
-
-function setAllPlatforms(enabled: boolean): void {
-  applyPlatformSelection(allPlatformSelection(enabled));
-}
-
-function applyPlatformSelection(next: PlatformSelection): void {
-  const enableTikTok = !platformSelection.tiktok && next.tiktok;
-  platformSelection = next;
-  for (const platform of PLATFORMS) platformToggleInputs[platform].checked = next[platform];
-  syncPlatformSelectionControls();
-  updateScheduleRequirement();
-  if (enableTikTok && tiktokConnected) void refreshTikTokCreatorInfo();
-}
-
-function syncPlatformSelectionControls(): void {
-  const state = selectionControlState(platformSelection);
-  selectAllPlatformsButton.disabled = state.allSelected;
-  selectAllPlatformsButton.setAttribute("aria-pressed", String(state.allSelected));
-  selectNoPlatformsButton.disabled = state.noneSelected;
-  selectNoPlatformsButton.setAttribute("aria-pressed", String(state.noneSelected));
-}
-
-function selectionFromToggleInputs(): PlatformSelection {
-  return Object.fromEntries(
-    PLATFORMS.map((platform) => [platform, platformToggleInputs[platform].checked]),
-  ) as PlatformSelection;
-}
-
-function selectedPlatforms(): Platform[] {
-  return selectedPlatformsFor(platformSelection);
-}
-
-function selectedPlatformsFromJob(job: StoredJob): Platform[] {
-  return (Object.entries(job.platforms) as Array<[Platform, boolean]>)
-    .filter(([, enabled]) => enabled)
-    .map(([platform]) => platform);
-}
-
-function readVideoDuration(file: File): Promise<number> {
+async function inspectVideo(file: File): Promise<{ duration: number; thumbnail: File }> {
   return new Promise((resolve, reject) => {
-    const video = document.createElement("video");
-    const url = URL.createObjectURL(file);
-    video.preload = "metadata";
-    video.addEventListener("loadedmetadata", () => {
-      const duration = video.duration;
-      URL.revokeObjectURL(url);
-      if (!Number.isFinite(duration) || duration <= 0) reject(new Error("Invalid video duration."));
-      else resolve(duration);
-    }, { once: true });
-    video.addEventListener("error", () => {
-      URL.revokeObjectURL(url);
-      reject(new Error("Could not read video metadata."));
+    const video = document.createElement("video"); const url = URL.createObjectURL(file); video.muted = true; video.preload = "metadata";
+    const fail = () => { URL.revokeObjectURL(url); reject(new Error("The browser could not read this MP4.")); };
+    video.addEventListener("error", fail, { once: true });
+    video.addEventListener("loadedmetadata", () => { if (!Number.isFinite(video.duration) || video.duration <= 0) return fail(); video.currentTime = Math.min(1, Math.max(0, video.duration / 10)); }, { once: true });
+    video.addEventListener("seeked", () => {
+      const canvas = document.createElement("canvas"); const scale = Math.min(1, 640 / Math.max(video.videoWidth, video.videoHeight));
+      canvas.width = Math.max(1, Math.round(video.videoWidth * scale)); canvas.height = Math.max(1, Math.round(video.videoHeight * scale));
+      canvas.getContext("2d")?.drawImage(video, 0, 0, canvas.width, canvas.height);
+      canvas.toBlob((blob) => { URL.revokeObjectURL(url); if (!blob) return reject(new Error("Could not create a thumbnail.")); resolve({ duration: video.duration, thumbnail: new File([blob], `${baseName(file.name)}-cover.jpg`, { type: "image/jpeg" }) }); }, "image/jpeg", 0.84);
     }, { once: true });
     video.src = url;
   });
 }
 
-function showToast(message: string, isError = false): void {
-  window.clearTimeout(toastTimer);
-  toast.textContent = message;
-  toast.classList.toggle("is-error", isError);
-  toast.hidden = false;
-  toastTimer = window.setTimeout(() => {
-    toast.hidden = true;
-  }, 7000);
+function upload(url: string, file: File, progress: (value: number) => void): Promise<void> { return xhrUpload(url, file, { "Content-Type": file.type }, progress, (xhr) => { if (xhr.status < 200 || xhr.status >= 300) throw new Error(`R2 rejected ${file.name} (HTTP ${xhr.status}).`); }); }
+async function uploadYouTube(url: string, token: string, file: File, progress: (value: number) => void): Promise<string> { let id = ""; await xhrUpload(url, file, { Authorization: `Bearer ${token}`, "Content-Type": file.type }, progress, (xhr) => { const result = parseJson(xhr.responseText) as { id?: string; error?: { message?: string } } | null; if (!result?.id || xhr.status < 200 || xhr.status >= 300) throw new Error(result?.error?.message ?? `YouTube upload failed (HTTP ${xhr.status}).`); id = result.id; }); return id; }
+function uploadTikTokChunk(url: string, chunk: Blob, start: number, end: number, total: number, last: boolean): Promise<void> { return xhrUpload(url, chunk, { "Content-Type": "video/mp4", "Content-Range": `bytes ${start}-${end - 1}/${total}` }, () => undefined, (xhr) => { if (xhr.status !== (last ? 201 : 206)) throw new Error(`TikTok rejected a video chunk (HTTP ${xhr.status}).`); }); }
+function xhrUpload(url: string, body: Blob, headers: Record<string, string>, progress: (value: number) => void, validate: (xhr: XMLHttpRequest) => void): Promise<void> {
+  return new Promise((resolve, reject) => { const xhr = new XMLHttpRequest(); activeXhrs.add(xhr); xhr.open("PUT", url); Object.entries(headers).forEach(([name, value]) => xhr.setRequestHeader(name, value)); xhr.upload.addEventListener("progress", (event) => { if (event.lengthComputable) progress(event.loaded / event.total); }); xhr.addEventListener("load", () => { activeXhrs.delete(xhr); try { validate(xhr); resolve(); } catch (error) { reject(error); } }); xhr.addEventListener("error", () => { activeXhrs.delete(xhr); reject(new Error("Upload interrupted.")); }); xhr.addEventListener("abort", () => { activeXhrs.delete(xhr); reject(new Error("Upload cancelled.")); }); xhr.send(body); });
 }
 
-function throwIfCancelled(): void {
-  if (cancelRequested) throw new Error("Upload cancelled by user.");
-}
+async function api<T>(path: string, init: RequestInit = {}): Promise<T> { const headers = new Headers(init.headers); if (init.body) headers.set("content-type", "application/json"); const response = await fetch(path, { ...init, headers }); const payload = await response.json().catch(() => null) as T | ApiError | null; if (!response.ok) throw new Error(payload && typeof payload === "object" && "error" in payload ? String(payload.error) : `Request failed (HTTP ${response.status}).`); return payload as T; }
+async function reportJobState(id: string, status: "failed" | "cancelled", error: string): Promise<void> { try { await api(`/api/jobs/${id}`, { method: "POST", body: JSON.stringify({ status, error }) }); } catch { /* best effort */ } }
 
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : "Something went wrong.";
-}
-
-function parseJson(value: string): unknown {
-  try {
-    return JSON.parse(value);
-  } catch {
-    return null;
-  }
-}
-
-function updateCount(id: string, value: number): void {
-  requiredElement<HTMLElement>(id).textContent = String(value);
-}
-
-function formatBytes(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  if (bytes < 1024 * 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
-  return `${(bytes / 1024 / 1024 / 1024).toFixed(2)} GB`;
-}
-
-function formatDate(value: string): string {
-  const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? value : date.toLocaleString();
-}
-
-function toLocalDateTime(value: string): string {
-  const date = new Date(value);
-  return new Date(date.getTime() - date.getTimezoneOffset() * 60_000).toISOString().slice(0, 16);
-}
-
-function formatDuration(seconds: number): string {
-  const rounded = Math.round(seconds);
-  const minutes = Math.floor(rounded / 60);
-  const remainder = rounded % 60;
-  return minutes ? `${minutes}:${String(remainder).padStart(2, "0")}` : `${remainder}s`;
-}
-
-function humanizeStatus(value: string): string {
-  return value.toLowerCase().replaceAll("_", " ");
-}
-
-function capitalize(value: string): string {
-  return `${value.charAt(0).toUpperCase()}${value.slice(1)}`;
-}
-
-function delay(milliseconds: number): Promise<void> {
-  return new Promise((resolve) => window.setTimeout(resolve, milliseconds));
-}
-
-function requiredElement<T extends HTMLElement>(id: string): T {
-  const element = document.getElementById(id);
-  if (!element) throw new Error(`Missing required element #${id}`);
-  return element as T;
-}
+async function mapLimit<T>(items: T[], limit: number, task: (item: T, index: number) => Promise<unknown>): Promise<void> { let cursor = 0; await Promise.all(Array.from({ length: Math.min(limit, items.length) }, async () => { while (cursor < items.length) { const index = cursor++; await task(items[index]!, index); } })); }
+function updateDraftStatus(draft: BatchDraft): void { const row = [...draftList.children][drafts.indexOf(draft)] as HTMLElement | undefined; const progress = row?.querySelector("progress"); if (progress) progress.setAttribute("value", String(draft.progress)); }
+function setBatchBusy(busy: boolean): void { el<HTMLButtonElement>("submit-batch").disabled = busy; el<HTMLButtonElement>("submit-batch").textContent = busy ? "Uploading…" : "Upload batch"; el<HTMLButtonElement>("cancel-batch").hidden = !busy; }
+function selectedPostIds(listId: string): string[] { return [...el<HTMLElement>(listId).querySelectorAll<HTMLInputElement>(".post-check:checked")].map((item) => item.dataset.id!); }
+function setPostChecks(listId: string, checked: boolean): void { el<HTMLElement>(listId).querySelectorAll<HTMLInputElement>(".post-check").forEach((item) => { item.checked = checked; }); }
+function selectionFromInputs(inputs: Record<Platform, HTMLInputElement>): Selection { return Object.fromEntries(PLATFORMS.map((platform) => [platform, inputs[platform].checked])) as Selection; }
+function settingCheckbox(label: string, checked: boolean, onChange: (value: boolean) => void): HTMLElement { const control = input("checkbox"); control.checked = checked; control.addEventListener("change", () => onChange(control.checked)); return wrap("label", "inline-setting", control, text("span", label)); }
+function field(label: string, control: HTMLElement): HTMLElement { return wrap("label", "editor-field", text("span", label), control); }
+function input(type: string): HTMLInputElement { const value = document.createElement("input"); value.type = type; return value; }
+function text<K extends keyof HTMLElementTagNameMap>(tag: K, value: string): HTMLElementTagNameMap[K] { const node = document.createElement(tag); node.textContent = value; return node; }
+function wrap<K extends keyof HTMLElementTagNameMap>(tag: K, className: string, ...children: Node[]): HTMLElementTagNameMap[K] { const node = document.createElement(tag); node.className = className; node.append(...children); return node; }
+function el<T extends HTMLElement>(id: string): T { const value = document.getElementById(id); if (!value) throw new Error(`Missing #${id}`); return value as T; }
+function isMp4(file: File): boolean { return file.type === "video/mp4" && file.name.toLowerCase().endsWith(".mp4"); }
+function baseName(value: string): string { return value.replace(/\.mp4$/iu, ""); }
+function applyTemplate(template: string, filename: string): string { return template.replaceAll("{filename}", filename); }
+function humanize(value: string): string { return value.replaceAll("_", " "); }
+function capitalize(value: string): string { return value.charAt(0).toUpperCase() + value.slice(1); }
+function message(error: unknown): string { return error instanceof Error ? error.message : "Something went wrong."; }
+function parseJson(value: string): unknown { try { return JSON.parse(value); } catch { return null; } }
+function formatBytes(bytes: number): string { if (bytes < 1024) return `${bytes} B`; if (bytes < 1_048_576) return `${(bytes / 1024).toFixed(1)} KB`; if (bytes < 1_073_741_824) return `${(bytes / 1_048_576).toFixed(1)} MB`; return `${(bytes / 1_073_741_824).toFixed(2)} GB`; }
+function formatDuration(seconds: number): string { const value = Math.round(seconds); return `${Math.floor(value / 60)}:${String(value % 60).padStart(2, "0")}`; }
+function formatDate(value: string): string { return new Date(value).toLocaleString(); }
+function toLocal(value: string): string { const date = new Date(value); return new Date(date.getTime() - date.getTimezoneOffset() * 60_000).toISOString().slice(0, 16); }
+function privacyLabel(value: string): string { return ({ PUBLIC_TO_EVERYONE: "Everyone", MUTUAL_FOLLOW_FRIENDS: "Friends", FOLLOWER_OF_CREATOR: "Followers", SELF_ONLY: "Only me" } as Record<string, string>)[value] ?? humanize(value); }
+function setMinimumDates(): void { const min = toLocal(new Date(Date.now() + 120_000).toISOString()); defaultSchedule.min = min; el<HTMLInputElement>("bulk-schedule-time").min = min; }
+function showToast(value: string, error = false): void { const toast = el<HTMLElement>("toast"); window.clearTimeout(toastTimer); toast.textContent = value; toast.classList.toggle("is-error", error); toast.hidden = false; toastTimer = window.setTimeout(() => { toast.hidden = true; }, 7000); }
+function showOAuthResult(): void { const url = new URL(location.href); const platform = PLATFORMS.find((value) => url.searchParams.has(value)); if (!platform) return; showToast(url.searchParams.get(platform) === "connected" ? `${capitalize(platform)} connected.` : url.searchParams.get("message") ?? `${capitalize(platform)} connection failed.`, url.searchParams.get(platform) !== "connected"); url.searchParams.delete(platform); url.searchParams.delete("message"); history.replaceState({}, "", `${url.pathname}${url.search}`); }

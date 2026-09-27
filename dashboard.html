@@ -3,386 +3,121 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta
-      name="description"
-      content="Upload one short-form video for YouTube Shorts, Instagram Reels, and TikTok."
-    />
+    <meta name="description" content="Upload and schedule short videos to connected social accounts." />
     <title>Social Uploader</title>
     <script type="module" src="/src/client/main.ts"></script>
   </head>
   <body>
-    <div class="page-shell">
-      <header class="site-header">
-        <a class="brand" href="/dashboard.html" aria-label="Social Uploader dashboard">
-          <span class="brand-mark" aria-hidden="true">S</span>
-          <span>Social Uploader</span>
-        </a>
-        <div class="header-actions">
-          <nav class="view-nav" aria-label="Dashboard sections">
-            <button class="view-nav-button is-active" type="button" data-view-target="uploader-view">Uploader</button>
-            <button class="view-nav-button" type="button" data-view-target="scheduled-view">Posts</button>
-            <button class="view-nav-button" type="button" data-view-target="status-view">System status</button>
-          </nav>
-          <span class="milestone-pill">TikTok review readiness</span>
-        </div>
+    <div class="app-shell">
+      <header class="topbar">
+        <a class="brand" href="/dashboard.html"><span>S</span>Social Uploader</a>
+        <nav class="main-nav" aria-label="Main sections">
+          <button class="nav-button is-active" type="button" data-view-target="new-view">New uploads</button>
+          <button class="nav-button" type="button" data-view-target="scheduled-view">Scheduled</button>
+          <button class="nav-button" type="button" data-view-target="history-view">History</button>
+        </nav>
+        <button class="utility-button" type="button" data-view-target="status-view">System Status</button>
       </header>
 
-      <main id="uploader-view" data-view>
-        <section class="hero" aria-labelledby="page-title">
-          <p class="eyebrow">One source. Three official APIs.</p>
-          <h1 id="page-title">Publish your next short video.</h1>
-          <p class="hero-copy">
-            Stage one transfer copy, send it to your selected platforms, verify provider custody,
-            and remove the temporary media as soon as every selected destination is done with it.
-          </p>
-        </section>
-
-        <form id="draft-form" class="workspace" novalidate>
-          <div class="main-column">
-            <section class="panel" aria-labelledby="media-heading">
-              <div class="section-heading">
-                <div>
-                  <p class="step-label">01 - Media</p>
-                  <h2 id="media-heading">Choose files</h2>
-                </div>
-                <p class="section-hint">MP4 video and a JPG, PNG, or WebP cover</p>
-              </div>
-
-              <div class="upload-grid">
-                <div
-                  id="video-dropzone"
-                  class="dropzone dropzone-video"
-                  role="button"
-                  tabindex="0"
-                  aria-controls="video-input"
-                >
-                  <input id="video-input" type="file" accept="video/mp4,.mp4" hidden />
-                  <div class="upload-icon" aria-hidden="true">
-                    <svg viewBox="0 0 24 24" focusable="false">
-                      <path d="M12 16V4m0 0L7.5 8.5M12 4l4.5 4.5M5 14v4a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-4" />
-                    </svg>
-                  </div>
-                  <div>
-                    <strong id="video-name">Drop your MP4 here</strong>
-                    <span id="video-meta">or click to choose a file - up to 2 GB</span>
-                  </div>
-                </div>
-
-                <div
-                  id="thumbnail-dropzone"
-                  class="dropzone dropzone-thumbnail"
-                  role="button"
-                  tabindex="0"
-                  aria-controls="thumbnail-input"
-                >
-                  <input id="thumbnail-input" type="file" accept="image/jpeg,image/png,image/webp,.jpg,.jpeg,.png,.webp" hidden />
-                  <div id="thumbnail-preview" class="thumbnail-preview" aria-hidden="true">
-                    <svg viewBox="0 0 24 24" focusable="false">
-                      <path d="M4 16l4.5-5 3.5 4 2.5-3 5.5 6H4v-2Zm0-10h16v12H4V6Zm11 3.5h.01" />
-                    </svg>
-                  </div>
-                  <div>
-                    <strong id="thumbnail-name">Choose a thumbnail</strong>
-                    <span id="thumbnail-meta">JPG, PNG, or WebP - up to 10 MB</span>
-                  </div>
-                </div>
-              </div>
-            </section>
-
-            <section class="panel" aria-labelledby="details-heading">
-              <div class="section-heading">
-                <div>
-                  <p class="step-label">02 - Details</p>
-                  <h2 id="details-heading">Post details</h2>
-                </div>
-                <p class="section-hint">Title plus shared caption</p>
-              </div>
-
-              <div class="field-stack">
-                <label class="field">
-                  <span>Title</span>
-                  <input
-                    id="title"
-                    name="title"
-                    type="text"
-                    maxlength="100"
-                    placeholder="Give your Short a clear title"
-                    required
-                  />
-                  <small><span id="title-count">0</span>/100</small>
-                </label>
-
-                <label class="field">
-                  <span>Caption / YouTube description</span>
-                  <textarea
-                    id="description"
-                    name="description"
-                    maxlength="2200"
-                    rows="6"
-                    placeholder="Write a description or add context..."
-                  ></textarea>
-                  <small><span id="description-count">0</span>/2,200</small>
-                </label>
-
-                <label class="field schedule-field">
-                  <span>Publish date and time</span>
-                  <input id="scheduled-at" name="scheduledAt" type="datetime-local" />
-                  <small id="timezone-label">Choose a future time, or leave blank to publish Instagram/TikTok now</small>
-                </label>
-              </div>
-            </section>
+      <main id="new-view" class="page" data-view>
+        <div class="page-heading">
+          <div><p class="eyebrow">Batch uploader</p><h1>New uploads</h1></div>
+          <div id="connections" class="connection-strip" aria-label="Platform connections">
+            <button type="button" data-connect="youtube"><b>YT</b><span id="youtube-connection-label">Checking</span></button>
+            <button type="button" data-connect="instagram"><b>IG</b><span id="instagram-connection-label">Checking</span></button>
+            <button type="button" data-connect="tiktok"><b>TT</b><span id="tiktok-connection-label">Checking</span></button>
           </div>
-
-          <aside class="side-column">
-            <section class="panel destinations-panel" aria-labelledby="destinations-heading">
-              <div class="section-heading compact">
-                <div>
-                  <p class="step-label">03 - Destination</p>
-                  <h2 id="destinations-heading">Choose platform</h2>
-                </div>
-                <div class="selection-actions">
-                  <button id="select-all-platforms" class="text-button" type="button">Select all</button>
-                  <button id="select-no-platforms" class="text-button" type="button">Select none</button>
-                </div>
-              </div>
-
-              <div class="platform-list">
-                <details class="platform-card" open>
-                  <summary>
-                    <span class="platform-identity">
-                      <span class="platform-icon youtube" aria-hidden="true">YT</span>
-                      <span><strong>YouTube</strong><small id="youtube-connection-label">Checking connection...</small></span>
-                    </span>
-                    <label class="toggle-wrap" title="Include YouTube">
-                      <input id="youtube-enabled" type="checkbox" aria-label="Include YouTube" checked />
-                      <span class="toggle" aria-hidden="true"></span>
-                    </label>
-                    <span class="chevron" aria-hidden="true"></span>
-                  </summary>
-                  <div class="platform-settings youtube-settings">
-                    <div class="connection-actions">
-                      <button id="youtube-connect" class="connect-button" type="button">Connect YouTube</button>
-                      <button id="youtube-disconnect" class="text-button" type="button" hidden>Disconnect</button>
-                    </div>
-                    <label class="mini-field">
-                      <span>Visibility</span>
-                      <select id="youtube-visibility">
-                        <option value="public">Public at scheduled time</option>
-                      </select>
-                    </label>
-                    <label class="mini-field">
-                      <span>Made for kids</span>
-                      <select id="youtube-made-for-kids">
-                        <option value="false">No, it is not made for kids</option>
-                        <option value="true">Yes, it is made for kids</option>
-                      </select>
-                    </label>
-                    <p class="settings-note">YouTube keeps the upload private until the scheduled publish time.</p>
-                  </div>
-                </details>
-
-                <details class="platform-card">
-                  <summary>
-                    <span class="platform-identity">
-                      <span class="platform-icon instagram" aria-hidden="true">IG</span>
-                      <span><strong>Instagram</strong><small id="instagram-connection-label">Checking connection...</small></span>
-                    </span>
-                    <label class="toggle-wrap" title="Include Instagram Reels">
-                      <input id="instagram-enabled" type="checkbox" aria-label="Include Instagram Reels" />
-                      <span class="toggle" aria-hidden="true"></span>
-                    </label>
-                    <span class="chevron" aria-hidden="true"></span>
-                  </summary>
-                  <div class="platform-settings platform-settings-grid">
-                    <div class="connection-actions">
-                      <button id="instagram-connect" class="connect-button" type="button">Connect Instagram</button>
-                      <button id="instagram-disconnect" class="text-button" type="button" hidden>Disconnect</button>
-                    </div>
-                    <label class="check-field">
-                      <input id="instagram-share-to-feed" type="checkbox" checked />
-                      <span>Also share Reel to feed</span>
-                    </label>
-                    <p class="settings-note">Future posts are sent by Social Uploader at publish time. Uses the shared caption and JPEG cover.</p>
-                  </div>
-                </details>
-
-                <details class="platform-card">
-                  <summary>
-                    <span class="platform-identity">
-                      <span class="platform-icon tiktok" aria-hidden="true">TT</span>
-                      <span><strong>TikTok</strong><small id="tiktok-connection-label">Checking connection...</small></span>
-                    </span>
-                    <label class="toggle-wrap" title="Include TikTok">
-                      <input id="tiktok-enabled" type="checkbox" aria-label="Include TikTok" />
-                      <span class="toggle" aria-hidden="true"></span>
-                    </label>
-                    <span class="chevron" aria-hidden="true"></span>
-                  </summary>
-                  <div class="platform-settings platform-settings-grid">
-                    <div class="connection-actions">
-                      <button id="tiktok-connect" class="connect-button" type="button">Connect TikTok</button>
-                      <button id="tiktok-disconnect" class="text-button" type="button" hidden>Disconnect</button>
-                    </div>
-                    <label class="mini-field">
-                      <span>Privacy</span>
-                      <select id="tiktok-privacy" required disabled>
-                        <option value="">Connect TikTok to load options</option>
-                      </select>
-                    </label>
-                    <div class="interaction-grid">
-                      <label class="check-field"><input id="tiktok-comments" type="checkbox" /><span>Allow comments</span></label>
-                      <label class="check-field"><input id="tiktok-duet" type="checkbox" /><span>Allow Duet</span></label>
-                      <label class="check-field"><input id="tiktok-stitch" type="checkbox" /><span>Allow Stitch</span></label>
-                    </div>
-                    <label class="mini-field">
-                      <span>Cover frame (milliseconds)</span>
-                      <input id="tiktok-cover-timestamp" type="number" min="0" step="1" value="0" />
-                    </label>
-                    <p id="tiktok-creator-info" class="settings-note">Connect TikTok to load creator posting limits.</p>
-                    <div class="interaction-grid commercial-disclosure-grid">
-                      <label class="check-field"><input id="tiktok-promote-own-brand" type="checkbox" /><span>Promotes my own brand</span></label>
-                      <label class="check-field"><input id="tiktok-paid-partnership" type="checkbox" /><span>Paid partnership / branded content</span></label>
-                    </div>
-                    <label class="check-field consent-field">
-                      <input id="tiktok-direct-post-consent" type="checkbox" />
-                      <span>I expressly consent to Social Uploader sending this video and caption directly to TikTok. By posting, I agree to TikTok's Music Usage Confirmation.</span>
-                    </label>
-                    <p class="settings-note restriction-note">TikTok public posting requires TikTok production approval.</p>
-                    <section class="review-mode-panel" aria-labelledby="tiktok-review-heading">
-                      <strong id="tiktok-review-heading">TikTok review mode</strong>
-                      <dl>
-                        <div><dt>Login Kit</dt><dd id="review-login-kit">Checking…</dd></div>
-                        <div><dt>video.publish</dt><dd id="review-video-publish">Checking…</dd></div>
-                        <div><dt>creator_info</dt><dd id="review-creator-info">Checking…</dd></div>
-                        <div><dt>Direct Post</dt><dd id="review-direct-post">Checking…</dd></div>
-                        <div><dt>App restriction</dt><dd id="review-app-restriction">Checking…</dd></div>
-                      </dl>
-                    </section>
-                  </div>
-                </details>
-              </div>
-            </section>
-
-            <section class="panel submit-panel">
-              <div id="upload-status" class="upload-status" aria-live="polite" hidden>
-                <div class="status-heading">
-                  <span id="status-state" class="state-badge state-uploading">Uploading</span>
-                  <button id="cancel-upload" class="text-button cancel-button" type="button">Cancel</button>
-                </div>
-                <div class="status-copy">
-                  <span id="status-label">Preparing upload...</span>
-                  <strong id="status-percent">0%</strong>
-                </div>
-                <div class="progress-track" aria-hidden="true"><span id="progress-bar"></span></div>
-                <div id="upload-result" class="upload-result" hidden>
-                  <div id="result-platforms"></div>
-                  <span id="result-cleanup"></span>
-                  <span id="result-warnings" class="result-warnings" hidden></span>
-                </div>
-              </div>
-
-              <button id="save-button" class="primary-button" type="submit">
-                <span>Upload &amp; publish</span>
-                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14m-5-5 5 5-5 5" /></svg>
-              </button>
-              <p class="submit-note">8 GB hard R2 cap - success deletes immediately - failures retain source for up to 24 hours.</p>
-            </section>
-          </aside>
-        </form>
-      </main>
-
-      <main id="scheduled-view" class="status-view" data-view hidden>
-        <section class="status-hero">
-          <div>
-            <p class="eyebrow">Delivery history</p>
-            <h1>Posts</h1>
-            <p>Track upcoming, failed, published, and cancelled deliveries in one place.</p>
-          </div>
-          <div class="status-refresh-wrap">
-            <button id="scheduled-refresh" class="connect-button" type="button">Refresh</button>
-            <small>Failed media remains available for retry for up to 24 hours.</small>
-          </div>
-        </section>
-        <nav class="post-tabs" aria-label="Post history filters">
-          <button class="post-tab is-active" type="button" data-post-filter="upcoming">Upcoming</button>
-          <button class="post-tab" type="button" data-post-filter="failed">Failed / Needs attention</button>
-          <button class="post-tab" type="button" data-post-filter="published">Published</button>
-          <button class="post-tab" type="button" data-post-filter="cancelled">Cancelled</button>
-        </nav>
-        <section id="scheduled-posts-list" class="scheduled-posts-list" aria-live="polite">
-          <article class="panel empty-scheduled">Load posts to view delivery history.</article>
-        </section>
-      </main>
-
-      <main id="status-view" class="status-view" data-view hidden>
-        <section class="status-hero">
-          <div>
-            <p class="eyebrow">Existing infrastructure only</p>
-            <h1>System status</h1>
-            <p>Storage, scheduler health, connections, and recent operational exceptions.</p>
-          </div>
-          <div class="status-refresh-wrap">
-            <button id="status-refresh" class="connect-button" type="button">Refresh</button>
-            <small id="status-generated-at">Not loaded yet</small>
-          </div>
-        </section>
-
-        <section class="status-card-grid overview-card-grid" aria-label="System overview">
-          <article class="panel status-card storage-card">
-            <p class="step-label">Temporary R2</p>
-            <div class="metric-row"><strong id="storage-used">—</strong><span id="storage-percent">—</span></div>
-            <div class="capacity-track" aria-hidden="true"><span id="storage-bar"></span></div>
-            <dl class="metric-details">
-              <div><dt>Objects</dt><dd id="storage-count">—</dd></div>
-              <div><dt>Oldest</dt><dd id="storage-oldest">—</dd></div>
-            </dl>
-            <p class="card-note">8 GB hard application cap.</p>
-          </article>
-
-          <article class="panel status-card compact-status-card">
-            <p class="step-label">Upcoming posts</p>
-            <div class="metric-row"><strong id="scheduled-count">—</strong><span>upcoming</span></div>
-            <p class="card-note">Next: <span id="next-scheduled-publish">—</span></p>
-          </article>
-
-          <article class="panel status-card compact-status-card attention-card">
-            <p class="step-label">Failed posts</p>
-            <div class="metric-row"><strong id="failed-posts-count">—</strong><span>need attention</span></div>
-            <button id="open-failed-posts" class="text-button" type="button">Open failed posts</button>
-          </article>
-
-          <article class="panel status-card compact-status-card">
-            <p class="step-label">Last scheduler run</p>
-            <strong id="last-scheduler-run">—</strong>
-            <p id="last-scheduler-summary" class="card-note">No run loaded.</p>
-          </article>
-
-          <article class="panel status-card connections-overview-card">
-            <p class="step-label">Connections</p>
-            <div class="connection-status-list">
-              <div><span class="platform-icon youtube">YT</span><strong>YouTube</strong><span id="status-youtube" class="connection-pill">—</span></div>
-              <div><span class="platform-icon instagram">IG</span><strong>Instagram</strong><span id="status-instagram" class="connection-pill">—</span></div>
-              <div><span class="platform-icon tiktok">TT</span><strong>TikTok</strong><span id="status-tiktok" class="connection-pill">—</span></div>
-            </div>
-          </article>
-        </section>
-
-        <div class="status-log-grid">
-          <section class="panel status-section">
-            <div class="section-heading compact"><div><p class="step-label">Cron history</p><h2>Scheduler runs</h2></div></div>
-            <ol id="scheduler-runs-list" class="event-list"><li class="empty-event">No scheduler runs loaded.</li></ol>
-          </section>
-          <section class="panel status-section">
-            <div class="section-heading compact"><div><p class="step-label">Attention</p><h2>Recent platform errors</h2></div></div>
-            <ol id="errors-list" class="event-list"><li class="empty-event">No errors loaded.</li></ol>
-          </section>
-          <section class="panel status-section">
-            <div class="section-heading compact"><div><p class="step-label">Storage</p><h2>Cleanup events</h2></div></div>
-            <ol id="cleanup-list" class="event-list"><li class="empty-event">No cleanup events loaded.</li></ol>
-          </section>
         </div>
+
+        <section class="panel defaults-panel" aria-labelledby="defaults-heading">
+          <div class="panel-heading">
+            <div><h2 id="defaults-heading">Shared defaults</h2><p>Set once, then override any row.</p></div>
+            <button id="apply-defaults" class="secondary-button" type="button">Apply defaults to all</button>
+          </div>
+          <div class="defaults-grid">
+            <label><span>Title template</span><input id="default-title" maxlength="100" value="{filename}" /></label>
+            <label class="wide"><span>Caption template</span><textarea id="default-caption" maxlength="2200" rows="2" placeholder="Use {filename} where the file name should appear"></textarea></label>
+            <fieldset class="platform-picker">
+              <legend>Platforms</legend>
+              <div class="picker-row">
+                <label><input id="default-youtube" type="checkbox" checked /><span>YT</span></label>
+                <label><input id="default-instagram" type="checkbox" /><span>IG</span></label>
+                <label><input id="default-tiktok" type="checkbox" /><span>TT</span></label>
+                <button id="platform-select-all" type="button">Select all</button>
+                <button id="platform-select-none" type="button">Select none</button>
+                <button id="apply-platforms-all" type="button">Apply to all</button>
+              </div>
+            </fieldset>
+            <label><span>Starting schedule</span><input id="default-schedule" type="datetime-local" /></label>
+            <label><span>Spacing</span><select id="default-spacing"><option value="0">Same time</option><option value="4">Every 4 hours</option><option value="12">Every 12 hours</option><option value="24">Every 1 day</option></select></label>
+          </div>
+          <details class="advanced-defaults">
+            <summary>Advanced platform defaults</summary>
+            <div class="advanced-grid">
+              <section id="youtube-default-settings"><h3>YouTube</h3><label><input id="youtube-made-for-kids" type="checkbox" /> Made for kids</label><p>Visibility is public at the native scheduled time.</p></section>
+              <section id="instagram-default-settings" hidden><h3>Instagram</h3><label><input id="instagram-share-to-feed" type="checkbox" checked /> Share Reel to feed</label></section>
+              <section id="tiktok-default-settings" hidden><h3>TikTok</h3><label>Privacy<select id="tiktok-privacy" disabled><option value="SELF_ONLY">Only me</option></select></label><div class="check-grid"><label><input id="tiktok-comments" type="checkbox" /> Comments</label><label><input id="tiktok-duet" type="checkbox" /> Duet</label><label><input id="tiktok-stitch" type="checkbox" /> Stitch</label></div><label><input id="tiktok-direct-post-consent" type="checkbox" /> I consent to Direct Post and TikTok's Music Usage Confirmation.</label><label><input id="tiktok-promote-own-brand" type="checkbox" /> Promotes my brand</label><label><input id="tiktok-paid-partnership" type="checkbox" /> Paid partnership</label><p id="tiktok-creator-info">Connect TikTok to load posting limits.</p></section>
+            </div>
+          </details>
+        </section>
+
+        <section id="video-dropzone" class="dropzone" tabindex="0" role="button" aria-controls="video-input">
+          <input id="video-input" type="file" accept="video/mp4,.mp4" multiple hidden />
+          <div class="drop-icon">+</div><div><strong>Drop MP4 files here</strong><span>or choose up to 20 files · 2 GB each · 8 GB total storage cap</span></div>
+        </section>
+
+        <section id="draft-section" class="queue-section" hidden>
+          <div class="queue-toolbar">
+            <label class="select-control"><input id="select-all-drafts" type="checkbox" /> Select all</label>
+            <span id="draft-count">0 drafts</span>
+            <div class="toolbar-actions">
+              <button id="apply-platforms-selected" type="button">Change platforms</button>
+              <button id="apply-schedule-selected" type="button">Change schedule</button>
+              <button id="delete-selected-drafts" type="button" class="danger-text">Delete draft</button>
+            </div>
+          </div>
+          <div id="schedule-preview" class="schedule-preview"></div>
+          <div class="queue-header" aria-hidden="true"><span></span><span>Video</span><span>Details</span><span>Platforms</span><span>Schedule</span><span>Status</span><span></span></div>
+          <div id="draft-list" class="queue-list"></div>
+          <div class="submit-bar">
+            <div><strong id="incoming-total">0 B incoming</strong><span>Capacity is checked for the whole batch before upload.</span></div>
+            <button id="cancel-batch" class="secondary-button" type="button" hidden>Cancel</button>
+            <button id="submit-batch" class="primary-button" type="button">Upload batch</button>
+          </div>
+        </section>
       </main>
 
+      <main id="scheduled-view" class="page" data-view hidden>
+        <div class="page-heading"><div><p class="eyebrow">Upcoming</p><h1>Scheduled</h1></div><button class="secondary-button refresh-posts" type="button">Refresh</button></div>
+        <section class="bulk-panel">
+          <label class="select-control"><input id="select-all-scheduled" type="checkbox" /> Select all</label>
+          <label>Set time <input id="bulk-schedule-time" type="datetime-local" /></label>
+          <label>Spacing <select id="bulk-schedule-spacing"><option value="0">Same time</option><option value="4">4 hours</option><option value="12">12 hours</option><option value="24">1 day</option></select></label>
+          <button id="bulk-set-schedule" type="button">Change schedule</button>
+          <label>Shift <input id="bulk-shift-amount" type="number" value="4" step="1" /></label>
+          <select id="bulk-shift-unit"><option value="1">hours</option><option value="24">days</option></select>
+          <button id="bulk-shift-back" type="button">← Shift</button><button id="bulk-shift-forward" type="button">Shift →</button>
+          <button id="bulk-change-platforms" type="button">Change platforms</button>
+          <button id="bulk-cancel" class="danger-text" type="button">Cancel</button>
+        </section>
+        <div id="scheduled-list" class="post-list" aria-live="polite"></div>
+      </main>
+
+      <main id="history-view" class="page" data-view hidden>
+        <div class="page-heading"><div><p class="eyebrow">Delivery log</p><h1>History</h1></div><button class="secondary-button refresh-posts" type="button">Refresh</button></div>
+        <section class="bulk-panel"><label class="select-control"><input id="select-all-history" type="checkbox" /> Select all</label><button id="bulk-retry" type="button">Retry failed platform</button></section>
+        <div id="history-list" class="post-list" aria-live="polite"></div>
+      </main>
+
+      <main id="status-view" class="page" data-view hidden>
+        <div class="page-heading"><div><p class="eyebrow">Operations</p><h1>System Status</h1></div><button id="status-refresh" class="secondary-button" type="button">Refresh</button></div>
+        <section id="system-summary" class="status-grid"><article class="panel"><span>Temporary R2</span><strong id="storage-used">—</strong><small id="storage-detail">—</small></article><article class="panel"><span>Scheduled</span><strong id="status-scheduled-count">—</strong><small id="status-next">—</small></article><article class="panel"><span>Failed</span><strong id="status-failed-count">—</strong><small id="status-run">—</small></article></section>
+        <section class="panel"><h2>Recent events</h2><ol id="events-list" class="event-list"></ol></section>
+      </main>
+
+      <dialog id="platform-dialog">
+        <form method="dialog"><h2>Change platforms</h2><div class="dialog-platforms"><label><input id="dialog-youtube" type="checkbox" /> YouTube</label><label><input id="dialog-instagram" type="checkbox" /> Instagram</label><label><input id="dialog-tiktok" type="checkbox" /> TikTok</label><label><input id="dialog-tiktok-consent" type="checkbox" /> I consent to Direct Post and TikTok's Music Usage Confirmation.</label></div><div class="dialog-actions"><button value="cancel">Cancel</button><button id="platform-dialog-apply" class="primary-button" value="default">Apply</button></div></form>
+      </dialog>
       <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
     </div>
   </body>

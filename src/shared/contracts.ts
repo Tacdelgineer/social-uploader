@@ -62,6 +62,20 @@ export interface PresignResponse {
   };
 }
 
+export const BATCH_MAX_POSTS = 20;
+
+export interface BatchPresignRequest {
+  items: PresignRequest[];
+}
+
+export interface BatchPresignResponse {
+  items: Array<{
+    jobId: string;
+    uploads: Record<AssetKind, PresignedUpload>;
+  }>;
+  capacity: PresignResponse["capacity"];
+}
+
 export interface DraftAssetInput {
   key: string;
   originalName: string;

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { calculateOutstandingBytes } from "./capacity";
-import { extensionFor, validateDraftRequest, validatePresignRequest } from "./validation";
+import { extensionFor, validateBatchPresignRequest, validateDraftRequest, validatePresignRequest } from "./validation";
 
 const id = "c7f654b1-ea1d-4bfb-9a06-4fb57280eb76";
 
@@ -71,6 +71,30 @@ describe("upload validation", () => {
         ],
       }),
     ).toBeNull();
+  });
+});
+
+describe("batch upload validation", () => {
+  const item = (jobId: string) => ({
+    jobId,
+    retention: "staging",
+    files: [
+      { kind: "video", fileName: "short.mp4", contentType: "video/mp4", size: 123 },
+      { kind: "thumbnail", fileName: "cover.jpg", contentType: "image/jpeg", size: 45 },
+    ],
+  });
+
+  it("accepts independent upload reservations in one batch", () => {
+    expect(validateBatchPresignRequest({
+      items: [item(id), item("dd2a9851-0a15-4bb2-b5ff-5a775d70fca9")],
+    })?.items).toHaveLength(2);
+  });
+
+  it("rejects duplicate jobs and batches over 20 posts", () => {
+    expect(validateBatchPresignRequest({ items: [item(id), item(id)] })).toBeNull();
+    expect(validateBatchPresignRequest({
+      items: Array.from({ length: 21 }, (_, index) => item(`00000000-0000-4000-8000-${String(index).padStart(12, "0")}`)),
+    })).toBeNull();
   });
 });
 

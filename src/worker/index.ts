@@ -3,6 +3,7 @@ import { R2_STORAGE_CAP_BYTES } from "../shared/contracts";
 import type {
   ApiError,
   AssetKind,
+  BatchPresignResponse,
   CompleteYouTubeRequest,
   CompleteYouTubeResponse,
   CreateJobResponse,
@@ -21,6 +22,7 @@ import type {
 import {
   CapacityExceededError,
   DuplicateJobError,
+  reserveBatchUploadCapacity,
   reserveUploadCapacity,
 } from "./capacity";
 import type { Env } from "./env";
@@ -79,7 +81,7 @@ import {
   validateCreatorSettings,
 } from "./tiktok";
 import { getTikTokReviewStatus, isTikTokAppAudited } from "./tiktok-review";
-import { extensionFor, validateDraftRequest, validatePresignRequest } from "./validation";
+import { extensionFor, validateBatchPresignRequest, validateDraftRequest, validatePresignRequest } from "./validation";
 import { setYouTubeThumbnail, startYouTubeUpload, verifyYouTubeSchedule } from "./youtube";
 
 const JSON_HEADERS = {
@@ -196,6 +198,9 @@ async function route(request: Request, env: Env): Promise<Response> {
   }
   if (url.pathname === "/api/uploads/presign" && request.method === "POST") {
     return createPresignedUpload(request, env);
+  }
+  if (url.pathname === "/api/uploads/batch-presign" && request.method === "POST") {
+    return createBatchPresignedUpload(request, env);
   }
   if (url.pathname === "/api/jobs" && request.method === "POST") {
     return createJob(request, env);
@@ -319,6 +324,52 @@ async function createPresignedUpload(request: Request, env: Env): Promise<Respon
       availableBytes: capacity.availableBytes,
     },
   } satisfies PresignResponse);
+}
+
+async function createBatchPresignedUpload(request: Request, env: Env): Promise<Response> {
+  const input = validateBatchPresignRequest(await readJson(request));
+  if (!input) return json({ error: "Invalid batch upload request." } satisfies ApiError, 400);
+  if (!env.R2_ACCOUNT_ID || !env.R2_ACCESS_KEY_ID || !env.R2_SECRET_ACCESS_KEY) {
+    return json({ error: "R2 upload signing is not configured." } satisfies ApiError, 503);
+  }
+
+  const keysByJob = new Map<string, string[]>();
+  for (const item of input.items) {
+    keysByJob.set(item.jobId, item.files.map((file) => objectKeyFor(item.jobId, item.retention, file)));
+  }
+  let capacity;
+  try {
+    capacity = await reserveBatchUploadCapacity(env.UPLOADS, input.items, keysByJob);
+  } catch (error) {
+    if (error instanceof CapacityExceededError) return json({ error: error.message } satisfies ApiError, 507);
+    if (error instanceof DuplicateJobError) return json({ error: error.message } satisfies ApiError, 409);
+    throw error;
+  }
+
+  const endpoint = `https://${env.R2_ACCOUNT_ID}.r2.cloudflarestorage.com`;
+  const client = new AwsClient({
+    accessKeyId: env.R2_ACCESS_KEY_ID,
+    secretAccessKey: env.R2_SECRET_ACCESS_KEY,
+    service: "s3",
+    region: "auto",
+  });
+
+  const items = await Promise.all(input.items.map(async (item) => {
+    const uploads = {} as Record<AssetKind, PresignedUpload>;
+    for (const file of item.files) {
+      uploads[file.kind] = await signUpload(
+        client,
+        endpoint,
+        env.R2_BUCKET_NAME,
+        item.jobId,
+        item.retention,
+        file,
+        capacity.expiresIn,
+      );
+    }
+    return { jobId: item.jobId, uploads };
+  }));
+  return json({ items, capacity } satisfies BatchPresignResponse);
 }
 
 async function signUpload(
@@ -979,7 +1030,7 @@ async function platformFailureResponse(
     jobId,
     message,
   });
-  return json({ error: `${message} Temporary source media remains covered by 7-day cleanup.` } satisfies ApiError, 502);
+  return json({ error: `${message} Temporary source media remains available for retry for up to 24 hours.` } satisfies ApiError, 502);
 }
 
 async function signTemporaryDownload(env: Env, objectKey: string): Promise<string> {

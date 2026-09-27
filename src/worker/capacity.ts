@@ -148,6 +148,57 @@ export async function reserveUploadCapacity(
   throw new Error("Storage capacity changed too quickly. Please retry the upload.");
 }
 
+export async function reserveBatchUploadCapacity(
+  bucket: R2Bucket,
+  inputs: PresignRequest[],
+  objectKeysByJob: ReadonlyMap<string, string[]>,
+): Promise<CapacityReservation> {
+  for (let attempt = 0; attempt < MAX_CAS_ATTEMPTS; attempt += 1) {
+    const now = new Date();
+    const currentObject = await bucket.get(LEDGER_KEY);
+    const currentLedger = currentObject ? parseLedger(await currentObject.text()) : emptyLedger(now);
+    const snapshot = await snapshotBucket(bucket);
+    const entries = reconcileEntries(currentLedger.entries, snapshot, now);
+    if (inputs.some((input) => entries[input.jobId])) throw new DuplicateJobError();
+
+    const createdAt = now.toISOString();
+    for (const input of inputs) {
+      entries[input.jobId] = {
+        jobId: input.jobId,
+        mediaBytes: input.files.reduce((sum, file) => sum + file.size, 0),
+        metadataReserveBytes: DRAFT_AND_LEDGER_RESERVE_BYTES,
+        keys: objectKeysByJob.get(input.jobId) ?? [],
+        createdAt,
+        presignExpiresAt: new Date(now.getTime() + PRESIGN_TTL_SECONDS * 1000).toISOString(),
+        cleanupAt: new Date(now.getTime() + CLEANUP_FALLBACK_MS).toISOString(),
+      };
+    }
+
+    const nextLedger: StorageLedger = { schemaVersion: 1, updatedAt: createdAt, entries };
+    const nextBody = JSON.stringify(nextLedger);
+    const ledgerGrowth = Math.max(0, byteLength(nextBody) - (currentObject?.size ?? 0));
+    const projectedBytes = calculateCommittedBytes(snapshot, entries, now) + ledgerGrowth;
+    if (projectedBytes > R2_STORAGE_CAP_BYTES) throw new CapacityExceededError();
+
+    const written = await bucket.put(LEDGER_KEY, nextBody, {
+      onlyIf: currentObject
+        ? { etagMatches: currentObject.etag }
+        : { etagDoesNotMatch: "*" },
+      httpMetadata: { contentType: "application/json" },
+      customMetadata: { purpose: "storage-cap-ledger" },
+    });
+    if (written) {
+      return {
+        limitBytes: R2_STORAGE_CAP_BYTES,
+        committedBytes: projectedBytes,
+        availableBytes: Math.max(0, R2_STORAGE_CAP_BYTES - projectedBytes),
+        expiresIn: PRESIGN_TTL_SECONDS,
+      };
+    }
+  }
+  throw new Error("Storage capacity changed too quickly. Please retry the batch.");
+}
+
 export function calculateOutstandingBytes(
   entry: LedgerEntry,
   sizesByKey: ReadonlyMap<string, number>,

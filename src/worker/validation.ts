@@ -7,6 +7,8 @@ import {
   VIDEO_MAX_BYTES,
   YOUTUBE_THUMBNAIL_CONTENT_TYPES,
   type AssetKind,
+  BATCH_MAX_POSTS,
+  type BatchPresignRequest,
   type DraftRequest,
   type PresignRequest,
   type UploadFileRequest,
@@ -48,6 +50,16 @@ export function validatePresignRequest(value: unknown): PresignRequest | null {
   if (!kinds.has("video") || !kinds.has("thumbnail")) return null;
 
   return { jobId, retention, files: safeFiles };
+}
+
+export function validateBatchPresignRequest(value: unknown): BatchPresignRequest | null {
+  if (!isRecord(value) || !Array.isArray(value.items)) return null;
+  if (value.items.length < 1 || value.items.length > BATCH_MAX_POSTS) return null;
+  const items = value.items.map(validatePresignRequest);
+  if (items.some((item) => item === null)) return null;
+  const safeItems = items as PresignRequest[];
+  if (new Set(safeItems.map((item) => item.jobId)).size !== safeItems.length) return null;
+  return { items: safeItems };
 }
 
 function validateUploadFile(value: unknown): UploadFileRequest | null {
