@@ -22,7 +22,7 @@ const TIKTOK_PRIVACY_OPTIONS = new Set([
 ]);
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-const ASSET_KEY_PATTERN = /^(?:uploads|staging|scheduled)\/([0-9a-f-]{36})\/(video\.mp4|thumbnail(?:-[0-9a-f-]{36})?\.(jpg|png|webp))$/i;
+const ASSET_KEY_PATTERN = /^(?:uploads|staging|scheduled)\/([0-9a-f-]{36})\/(video\.(?:mp4|mov)|thumbnail(?:-[0-9a-f-]{36})?\.(jpg|png|webp))$/i;
 const TIMEZONE_PATTERN = /^[A-Za-z0-9_+\-/]{1,100}$/;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -31,6 +31,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 export function extensionFor(kind: AssetKind, contentType: string): string | null {
   if (kind === "video" && contentType === "video/mp4") return "mp4";
+  if (kind === "video" && contentType === "video/quicktime") return "mov";
   if (kind === "thumbnail" && contentType === "image/jpeg") return "jpg";
   if (kind === "thumbnail" && contentType === "image/png") return "png";
   if (kind === "thumbnail" && contentType === "image/webp") return "webp";
@@ -155,6 +156,7 @@ export function validateDraftRequest(value: unknown, now = new Date()): DraftReq
       typeof assets.video.size !== "number" ||
       typeof assets.thumbnail.size !== "number" ||
       assets.video.size > INSTAGRAM_VIDEO_MAX_BYTES ||
+      !["video/mp4", "video/quicktime"].includes(String(assets.video.contentType)) ||
       assets.thumbnail.contentType !== "image/jpeg" ||
       assets.thumbnail.size > INSTAGRAM_COVER_MAX_BYTES ||
       videoDurationSeconds < 3 ||
@@ -163,6 +165,7 @@ export function validateDraftRequest(value: unknown, now = new Date()): DraftReq
       return null;
     }
   }
+  if (platforms.tiktok && assets.video.contentType !== "video/mp4") return null;
 
   return value as unknown as DraftRequest;
 }
@@ -190,7 +193,7 @@ function isAssetInput(value: unknown, jobId: string, kind: AssetKind): boolean {
   if (typeof contentType !== "string" || typeof size !== "number" || !Number.isSafeInteger(size)) return false;
   const match = ASSET_KEY_PATTERN.exec(key);
   if (!match || match[1]?.toLowerCase() !== jobId.toLowerCase()) return false;
-  if (kind === "video" && match[2]?.toLowerCase() !== "video.mp4") return false;
+  if (kind === "video" && !["video.mp4", "video.mov"].includes(match[2]?.toLowerCase() ?? "")) return false;
   if (kind === "thumbnail" && !match[2]?.toLowerCase().startsWith("thumbnail.")) return false;
   return extensionFor(kind, contentType) !== null && size > 0;
 }

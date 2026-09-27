@@ -6,7 +6,7 @@ import { oauthRedirect, oauthStateCookie, providerError, readCookie } from "./oa
 const TOKEN_KEY = "oauth:tiktok";
 const STATE_COOKIE = "tiktok_oauth_state";
 const COOKIE_PATH = "/api/oauth/tiktok";
-const SCOPES = "user.info.basic,video.publish";
+const SCOPES = "user.info.basic,video.publish,video.list";
 const REFRESH_WINDOW_MS = 60 * 60 * 1000;
 
 interface StoredTikTokTokens {

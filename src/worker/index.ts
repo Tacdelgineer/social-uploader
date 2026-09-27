@@ -19,6 +19,7 @@ import type {
   TikTokStartResponse,
   UploadFileRequest,
 } from "../shared/contracts";
+import { getAnalyticsSnapshot, parseAnalyticsRange } from "./analytics";
 import {
   CapacityExceededError,
   DuplicateJobError,
@@ -124,6 +125,11 @@ async function route(request: Request, env: Env): Promise<Response> {
   }
   if (url.pathname === "/api/system/status" && request.method === "GET") {
     return json(await getSystemStatus(env));
+  }
+  if (url.pathname === "/api/analytics" && request.method === "GET") {
+    const range = parseAnalyticsRange(url);
+    if (!range) return json({ error: "Choose a valid analytics date range of 366 days or less." } satisfies ApiError, 400);
+    return json(await getAnalyticsSnapshot(env, range, url.searchParams.get("refresh") === "1"));
   }
   if (url.pathname === "/api/scheduled-posts" && request.method === "GET") {
     return json({ posts: await listScheduledPosts(env) });

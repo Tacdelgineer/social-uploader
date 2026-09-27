@@ -157,7 +157,7 @@ export async function editScheduledPost(
     throw new Error("Choose a valid publish time at least one minute in the future and supported platform settings.");
   }
   if (!job.platforms.instagram && candidate.platforms.instagram && job.assets.video.size > INSTAGRAM_VIDEO_MAX_BYTES) {
-    throw new Error("This source video is too large to add Instagram.");
+    throw new Error("Instagram Reels accept source videos up to 1 GB.");
   }
   const added = selected(candidate).filter((platform) => !job.platforms[platform]);
   if (added.length > 0 && job.mediaDeleted) {

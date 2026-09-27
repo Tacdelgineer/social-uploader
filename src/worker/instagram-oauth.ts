@@ -7,7 +7,7 @@ import { metaProviderError, oauthRedirect, oauthStateCookie, providerError, read
 const TOKEN_KEY = "oauth:instagram";
 const STATE_COOKIE = "instagram_oauth_state";
 const COOKIE_PATH = "/api/oauth/instagram";
-const SCOPES = "instagram_business_basic,instagram_business_content_publish";
+const SCOPES = "instagram_business_basic,instagram_business_content_publish,instagram_business_manage_insights";
 const REFRESH_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
 const MIN_REFRESH_AGE_MS = 24 * 60 * 60 * 1000;
 
@@ -198,7 +198,7 @@ export async function disconnectInstagram(env: Env): Promise<void> {
 
 export async function getInstagramCredentials(
   env: Env,
-): Promise<{ accessToken: string; userId: string; username?: string }> {
+): Promise<{ accessToken: string; userId: string; username?: string; permissions: string[] }> {
   requireConfiguration(env);
   const encrypted = await env.METADATA.get(TOKEN_KEY);
   if (!encrypted) throw new Error("Connect Instagram before submitting an Instagram Reel.");
@@ -221,7 +221,7 @@ export async function getInstagramCredentials(
   if (tokens.expiresAt <= now + REFRESH_WINDOW_MS && now - tokens.refreshedAt >= MIN_REFRESH_AGE_MS) {
     tokens = await refreshTokens(tokens, env);
   }
-  return { accessToken: tokens.accessToken, userId: tokens.publishingUserId, username: tokens.username };
+  return { accessToken: tokens.accessToken, userId: tokens.publishingUserId, username: tokens.username, permissions: tokens.permissions };
 }
 
 async function refreshTokens(tokens: StoredInstagramTokens, env: Env): Promise<StoredInstagramTokens> {

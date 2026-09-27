@@ -5,6 +5,8 @@ import {
   R2_STORAGE_CAP_BYTES,
   VIDEO_MAX_BYTES,
   type ApiError,
+  type AnalyticsPost,
+  type AnalyticsSnapshot,
   type BatchPresignRequest,
   type BatchPresignResponse,
   type CompleteYouTubeResponse,
@@ -49,6 +51,8 @@ interface BatchDraft {
   thumbnail: File;
   thumbnailUrl: string;
   duration: number;
+  width: number;
+  height: number;
   title: string;
   caption: string;
   platforms: Selection;
@@ -63,6 +67,8 @@ interface BatchDraft {
 
 const drafts: BatchDraft[] = [];
 let posts: ScheduledPostSummary[] = [];
+let analyticsSnapshot: AnalyticsSnapshot | null = null;
+let analyticsRange: "7" | "28" | "90" | "custom" = "7";
 let connected: Selection = { youtube: false, instagram: false, tiktok: false };
 let tiktokCreator: TikTokCreatorInfo | null = null;
 let tiktokReview: TikTokReviewStatus | null = null;
@@ -78,12 +84,14 @@ const draftList = el<HTMLElement>("draft-list");
 const defaultSchedule = el<HTMLInputElement>("default-schedule");
 
 setMinimumDates();
+setupTheme();
 setupNavigation();
 setupConnections();
 setupDefaults();
 setupDropzone();
 setupBatchActions();
 setupPostActions();
+setupAnalyticsActions();
 showOAuthResult();
 void refreshConnections();
 
@@ -94,8 +102,22 @@ function setupNavigation(): void {
       document.querySelectorAll<HTMLElement>("[data-view]").forEach((view) => { view.hidden = view.id !== target; });
       document.querySelectorAll<HTMLButtonElement>("[data-view-target]").forEach((item) => item.classList.toggle("is-active", item === button));
       if (target === "scheduled-view" || target === "history-view") void refreshPosts();
+      if (target === "analytics-view" && !analyticsSnapshot) void refreshAnalytics(false);
       if (target === "status-view") void refreshSystemStatus();
     });
+  });
+}
+
+function setupTheme(): void {
+  const control = el<HTMLSelectElement>("theme-select");
+  const stored = localStorage.getItem("social-uploader-theme");
+  const theme = stored === "light" || stored === "dark" ? stored : "system";
+  control.value = theme;
+  document.documentElement.dataset.theme = theme;
+  control.addEventListener("change", () => {
+    const next = control.value;
+    document.documentElement.dataset.theme = next;
+    localStorage.setItem("social-uploader-theme", next);
   });
 }
 
@@ -208,10 +230,37 @@ function setupPostActions(): void {
   el<HTMLButtonElement>("status-refresh").addEventListener("click", () => void refreshSystemStatus());
 }
 
+function setupAnalyticsActions(): void {
+  const today = new Date();
+  el<HTMLInputElement>("analytics-end").value = dateOnly(today);
+  el<HTMLInputElement>("analytics-start").value = dateOnly(new Date(today.getTime() - 6 * 86_400_000));
+  document.querySelectorAll<HTMLButtonElement>("[data-range-days]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const value = button.dataset.rangeDays as typeof analyticsRange;
+      analyticsRange = value;
+      document.querySelectorAll<HTMLButtonElement>("[data-range-days]").forEach((item) => item.classList.toggle("is-active", item === button));
+      el<HTMLElement>("custom-range").hidden = value !== "custom";
+      if (value !== "custom") void refreshAnalytics(false);
+    });
+  });
+  el<HTMLInputElement>("analytics-start").addEventListener("change", () => { if (analyticsRange === "custom") void refreshAnalytics(false); });
+  el<HTMLInputElement>("analytics-end").addEventListener("change", () => { if (analyticsRange === "custom") void refreshAnalytics(false); });
+  el<HTMLButtonElement>("analytics-refresh").addEventListener("click", () => void refreshAnalytics(true));
+  el<HTMLButtonElement>("copy-ai").addEventListener("click", () => void copyAnalyticsForAi());
+  el<HTMLButtonElement>("export-json").addEventListener("click", () => {
+    if (!analyticsSnapshot) return void showToast("Load analytics first.", true);
+    downloadFile(`social-analytics-${analyticsSnapshot.range.end}.json`, JSON.stringify(analyticsSnapshot, null, 2), "application/json");
+  });
+  el<HTMLButtonElement>("export-csv").addEventListener("click", () => {
+    if (!analyticsSnapshot) return void showToast("Load analytics first.", true);
+    downloadFile(`social-analytics-${analyticsSnapshot.range.end}.csv`, analyticsCsv(analyticsSnapshot), "text/csv;charset=utf-8");
+  });
+}
+
 async function addFiles(files: File[]): Promise<void> {
   const room = BATCH_MAX_POSTS - drafts.length;
-  const accepted = files.filter(isMp4).slice(0, room);
-  if (accepted.length !== files.length) showToast(`Only MP4 files are accepted; a batch is limited to ${BATCH_MAX_POSTS} posts.`, true);
+  const accepted = files.filter(isSupportedVideo).slice(0, room);
+  if (accepted.length !== files.length) showToast(`Only MP4 and MOV files are accepted; a batch is limited to ${BATCH_MAX_POSTS} posts.`, true);
   const oversized = accepted.find((file) => file.size <= 0 || file.size > VIDEO_MAX_BYTES);
   if (oversized) { showToast(`${oversized.name} must be between 1 byte and 2 GB.`, true); return; }
   const total = drafts.reduce((sum, draft) => sum + draft.file.size + draft.thumbnail.size, 0) + accepted.reduce((sum, file) => sum + file.size, 0);
@@ -225,7 +274,7 @@ async function addFiles(files: File[]): Promise<void> {
       const index = drafts.length;
       drafts.push({
         id: crypto.randomUUID(), file, thumbnail: media.thumbnail,
-        thumbnailUrl: URL.createObjectURL(media.thumbnail), duration: media.duration,
+        thumbnailUrl: URL.createObjectURL(media.thumbnail), duration: media.duration, width: media.width, height: media.height,
         title: applyTemplate(el<HTMLInputElement>("default-title").value, name).slice(0, 100) || name.slice(0, 100),
         caption: applyTemplate(el<HTMLTextAreaElement>("default-caption").value, name).slice(0, 2200),
         platforms: defaultPlatforms(), scheduledAt: calculatedSchedule(index), settings: defaultSettings(),
@@ -256,7 +305,7 @@ function renderDraft(draft: BatchDraft): HTMLElement {
   check.addEventListener("change", () => { draft.selected = check.checked; renderDrafts(); });
   const select = wrap("div", "row-select", check);
   const image = document.createElement("img"); image.src = draft.thumbnailUrl; image.alt = "";
-  const media = wrap("div", "media-cell", image, text("strong", draft.file.name), text("small", `${formatBytes(draft.file.size)} · ${formatDuration(draft.duration)}`));
+  const media = wrap("div", "media-cell", image, text("strong", draft.file.name), text("small", `${formatBytes(draft.file.size)} · ${formatDuration(draft.duration)} · ${draft.width}×${draft.height}`));
   const title = input("text"); title.value = draft.title; title.maxLength = 100; title.disabled = draft.status !== "ready";
   title.addEventListener("input", () => { draft.title = title.value; });
   const caption = document.createElement("textarea"); caption.value = draft.caption; caption.maxLength = 2200; caption.rows = 2; caption.disabled = draft.status !== "ready";
@@ -370,10 +419,13 @@ function validateDrafts(items: BatchDraft[]): boolean {
     if (!draft.title.trim()) return invalid(`${draft.file.name} needs a title.`);
     if (!selected.length) return invalid(`${draft.file.name} needs at least one platform.`);
     for (const platform of selected) if (!connected[platform]) seenConnections.add(platform);
-    if (draft.platforms.instagram && (draft.file.size > INSTAGRAM_VIDEO_MAX_BYTES || draft.duration < 3 || draft.duration > 900)) return invalid(`${draft.file.name} does not meet Instagram's 300 MB and 3 sec–15 min limits.`);
+    if (draft.platforms.instagram && draft.file.size > INSTAGRAM_VIDEO_MAX_BYTES) return invalid(`${draft.file.name} exceeds Instagram's 1 GB Reel limit.`);
+    if (draft.platforms.instagram && (draft.duration < 3 || draft.duration > 900)) return invalid(`${draft.file.name} must be between 3 seconds and 15 minutes for Instagram Reels.`);
+    if (draft.platforms.instagram && draft.width > 1920) return invalid(`${draft.file.name} is ${draft.width}px wide; Instagram Reels allow at most 1920 horizontal pixels.`);
     if (draft.platforms.youtube && (!draft.scheduledAt || new Date(draft.scheduledAt).getTime() <= Date.now() + 60_000)) return invalid(`${draft.file.name} needs a YouTube schedule at least one minute in the future.`);
     if (draft.scheduledAt && Number.isNaN(new Date(draft.scheduledAt).getTime())) return invalid(`${draft.file.name} has an invalid schedule.`);
     if (draft.platforms.tiktok) {
+      if (draft.file.type !== "video/mp4") return invalid(`${draft.file.name} is MOV; the current TikTok FILE_UPLOAD path accepts MP4 only.`);
       if (!tiktokCreator) return invalid("TikTok creator settings are not available.");
       if (!draft.settings.tiktokConsent) return invalid(`${draft.file.name} needs TikTok Direct Post consent.`);
       if (draft.duration > tiktokCreator.maxVideoDurationSeconds) return invalid(`${draft.file.name} exceeds this TikTok creator's duration limit.`);
@@ -389,7 +441,7 @@ function invalid(value: string): false { showToast(value, true); return false; }
 function presignInput(draft: BatchDraft): PresignRequest {
   const future = draft.scheduledAt && new Date(draft.scheduledAt).getTime() > Date.now();
   return { jobId: draft.id, retention: future && (draft.platforms.instagram || draft.platforms.tiktok) ? "scheduled" : "staging", files: [
-    { kind: "video", fileName: draft.file.name, contentType: "video/mp4", size: draft.file.size },
+    { kind: "video", fileName: draft.file.name, contentType: draft.file.type, size: draft.file.size },
     { kind: "thumbnail", fileName: draft.thumbnail.name, contentType: draft.thumbnail.type, size: draft.thumbnail.size },
   ] };
 }
@@ -408,7 +460,7 @@ function buildJob(draft: BatchDraft, videoKey: string, thumbnailKey: string): Dr
       promoteOwnBrand: draft.settings.tiktokPromoteOwnBrand, paidPartnership: draft.settings.tiktokPaidPartnership,
     },
     assets: {
-      video: { key: videoKey, originalName: draft.file.name, contentType: "video/mp4", size: draft.file.size },
+      video: { key: videoKey, originalName: draft.file.name, contentType: draft.file.type, size: draft.file.size },
       thumbnail: { key: thumbnailKey, originalName: draft.thumbnail.name, contentType: draft.thumbnail.type, size: draft.thumbnail.size },
     },
   };
@@ -546,6 +598,166 @@ async function bulkRetry(): Promise<void> {
   try { await mapLimit(tasks, 2, (task) => api(`/api/jobs/${task.id}/retry/${task.platform}`, { method: "POST", body: "{}" })); showToast(`${tasks.length} failed platform step${tasks.length === 1 ? "" : "s"} queued.`); await refreshPosts(); } catch (error) { showToast(message(error), true); }
 }
 
+async function refreshAnalytics(refresh: boolean): Promise<void> {
+  const button = el<HTMLButtonElement>("analytics-refresh");
+  button.disabled = true;
+  button.textContent = "Loading…";
+  try {
+    const range = selectedAnalyticsRange();
+    const query = new URLSearchParams({ ...range, ...(refresh ? { refresh: "1" } : {}) });
+    analyticsSnapshot = await api<AnalyticsSnapshot>(`/api/analytics?${query}`);
+    renderAnalytics(analyticsSnapshot);
+  } catch (error) { showToast(message(error), true); }
+  finally { button.disabled = false; button.textContent = "Refresh"; }
+}
+
+function selectedAnalyticsRange(): { start: string; end: string; label: string } {
+  if (analyticsRange === "custom") {
+    const start = el<HTMLInputElement>("analytics-start").value;
+    const end = el<HTMLInputElement>("analytics-end").value;
+    if (!start || !end || start > end) throw new Error("Choose a valid custom date range.");
+    return { start, end, label: "custom" };
+  }
+  const days = Number(analyticsRange);
+  const end = new Date();
+  const start = new Date(end.getTime() - (days - 1) * 86_400_000);
+  return { start: dateOnly(start), end: dateOnly(end), label: `${days}d` };
+}
+
+function renderAnalytics(snapshot: AnalyticsSnapshot): void {
+  const allPosts: AnalyticsPost[] = [];
+  for (const platform of PLATFORMS) {
+    const data = snapshot.platforms[platform];
+    allPosts.push(...data.posts);
+    const status = el<HTMLElement>(`${platform}-analytics-status`);
+    status.textContent = data.account ? `${data.account} · ${humanize(data.status)}` : humanize(data.status);
+    status.title = data.message ?? "";
+    status.className = `availability ${data.status}`;
+    el<HTMLElement>(`${platform}-analytics-views`).textContent = metric(data.totals.views);
+    el<HTMLElement>(`${platform}-analytics-watch`).textContent = data.totals.watchMinutes === null ? "Unavailable" : `${metric(data.totals.watchMinutes)} min`;
+    el<HTMLElement>(`${platform}-analytics-engagements`).textContent = metric(sumNullable(data.totals.likes, data.totals.comments, data.totals.shares));
+  }
+  const comparablePlatforms = PLATFORMS.filter((platform) => snapshot.platforms[platform].totals.views !== null);
+  const bestPlatform = comparablePlatforms.sort((left, right) => (snapshot.platforms[right].totals.views ?? 0) - (snapshot.platforms[left].totals.views ?? 0))[0];
+  el<HTMLElement>("best-platform").textContent = bestPlatform ? `${capitalize(bestPlatform)} · ${metric(snapshot.platforms[bestPlatform].totals.views)} views` : "Insufficient data";
+  const comparablePosts = allPosts.filter((post) => post.metrics.views !== null).sort((left, right) => (right.metrics.views ?? 0) - (left.metrics.views ?? 0));
+  el<HTMLElement>("best-post").textContent = comparablePosts[0] ? `${truncate(comparablePosts[0].title, 42)} · ${metric(comparablePosts[0].metrics.views)}` : "Insufficient data";
+  const worst = comparablePosts.at(-1);
+  el<HTMLElement>("worst-post").textContent = worst ? `${truncate(worst.title, 42)} · ${metric(worst.metrics.views)}` : "Insufficient data";
+  const trend = combinedTrend(snapshot);
+  el<HTMLElement>("recent-trend").textContent = trendLabel(trend);
+  renderAnalyticsChart(trend);
+  renderAnalyticsPosts(allPosts);
+  const limitations = el<HTMLUListElement>("analytics-limitations"); limitations.replaceChildren();
+  const messages = [...snapshot.limitations];
+  for (const platform of PLATFORMS) {
+    const missing = snapshot.platforms[platform].missingMetrics;
+    if (missing.length) messages.push(`${capitalize(platform)} missing: ${missing.join(", ")}.`);
+  }
+  for (const value of [...new Set(messages)]) limitations.append(text("li", value));
+  if (!limitations.childElementCount) limitations.append(text("li", "All requested metrics are available."));
+}
+
+function combinedTrend(snapshot: AnalyticsSnapshot): Array<{ date: string; views: number }> {
+  const points = new Map<string, number>();
+  for (const platform of PLATFORMS) for (const point of snapshot.platforms[platform].trend) {
+    if (point.views !== null) points.set(point.date, (points.get(point.date) ?? 0) + point.views);
+  }
+  return [...points].sort(([left], [right]) => left.localeCompare(right)).map(([date, views]) => ({ date, views }));
+}
+
+function renderAnalyticsChart(points: Array<{ date: string; views: number }>): void {
+  const host = el<HTMLElement>("analytics-chart"); host.replaceChildren();
+  if (!points.length) { host.append(text("p", "Daily history is unavailable for the connected providers or permission set.")); return; }
+  const width = 760; const height = 230; const pad = 34; const max = Math.max(1, ...points.map((point) => point.views));
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("viewBox", `0 0 ${width} ${height}`); svg.setAttribute("role", "img"); svg.setAttribute("aria-label", "Views by day");
+  for (let index = 0; index < 4; index += 1) {
+    const y = pad + ((height - pad * 2) / 3) * index;
+    const line = document.createElementNS(svg.namespaceURI, "line"); line.setAttribute("x1", String(pad)); line.setAttribute("x2", String(width - pad)); line.setAttribute("y1", String(y)); line.setAttribute("y2", String(y)); line.setAttribute("class", "chart-gridline"); svg.append(line);
+  }
+  const coordinates = points.map((point, index) => {
+    const x = pad + (points.length === 1 ? 0 : index / (points.length - 1)) * (width - pad * 2);
+    const y = height - pad - (point.views / max) * (height - pad * 2);
+    return `${x},${y}`;
+  });
+  const area = document.createElementNS(svg.namespaceURI, "polygon");
+  area.setAttribute("points", `${pad},${height - pad} ${coordinates.join(" ")} ${width - pad},${height - pad}`); area.setAttribute("class", "chart-area"); svg.append(area);
+  const line = document.createElementNS(svg.namespaceURI, "polyline"); line.setAttribute("points", coordinates.join(" ")); line.setAttribute("class", "chart-line"); svg.append(line);
+  const maxLabel = document.createElementNS(svg.namespaceURI, "text"); maxLabel.setAttribute("x", "4"); maxLabel.setAttribute("y", String(pad)); maxLabel.textContent = metric(max); svg.append(maxLabel);
+  const startLabel = document.createElementNS(svg.namespaceURI, "text"); startLabel.setAttribute("x", String(pad)); startLabel.setAttribute("y", String(height - 8)); startLabel.textContent = points[0]!.date; svg.append(startLabel);
+  const endLabel = document.createElementNS(svg.namespaceURI, "text"); endLabel.setAttribute("x", String(width - pad)); endLabel.setAttribute("y", String(height - 8)); endLabel.setAttribute("text-anchor", "end"); endLabel.textContent = points.at(-1)!.date; svg.append(endLabel);
+  host.append(svg);
+}
+
+function renderAnalyticsPosts(posts: AnalyticsPost[]): void {
+  const body = el<HTMLTableSectionElement>("analytics-posts"); body.replaceChildren();
+  const sorted = [...posts].sort((left, right) => (right.metrics.views ?? -1) - (left.metrics.views ?? -1));
+  for (const post of sorted) {
+    const row = document.createElement("tr");
+    const titleCell = document.createElement("td");
+    if (post.url) { const link = document.createElement("a"); link.href = post.url; link.target = "_blank"; link.rel = "noreferrer"; link.textContent = post.title; titleCell.append(link); }
+    else titleCell.textContent = post.title;
+    row.append(text("td", LABELS[post.platform]), titleCell, text("td", post.publishedAt ? new Date(post.publishedAt).toLocaleDateString() : "—"), text("td", metric(post.metrics.views)), text("td", metric(post.metrics.likes)), text("td", metric(post.metrics.comments)), text("td", metric(post.metrics.shares)), text("td", post.metrics.watchMinutes === null ? "—" : `${metric(post.metrics.watchMinutes)}m`));
+    body.append(row);
+  }
+  if (!body.childElementCount) { const row = document.createElement("tr"); const cell = text("td", "No posts were returned for this date range."); cell.colSpan = 8; row.append(cell); body.append(row); }
+}
+
+async function copyAnalyticsForAi(): Promise<void> {
+  if (!analyticsSnapshot) return void showToast("Load analytics first.", true);
+  try { await navigator.clipboard.writeText(analyticsMarkdown(analyticsSnapshot)); showToast("Analytics copied as compact AI-ready Markdown."); }
+  catch { showToast("The browser blocked clipboard access. Use Export JSON instead.", true); }
+}
+
+function analyticsMarkdown(snapshot: AnalyticsSnapshot): string {
+  const lines = [
+    "# Cross-platform content analytics", `Range: ${snapshot.range.start} to ${snapshot.range.end} (${snapshot.range.label})`,
+    `Generated: ${snapshot.generatedAt}`, "",
+  ];
+  for (const platform of PLATFORMS) {
+    const data = snapshot.platforms[platform];
+    lines.push(`## ${capitalize(platform)} — ${data.account ?? humanize(data.status)}`);
+    lines.push(`Availability: ${humanize(data.status)}${data.message ? ` — ${data.message}` : ""}`);
+    lines.push(`Totals: views ${metric(data.totals.views)}; engaged views ${metric(data.totals.engagedViews)}; likes ${metric(data.totals.likes)}; comments ${metric(data.totals.comments)}; shares ${metric(data.totals.shares)}; watch minutes ${metric(data.totals.watchMinutes)}; avg view duration ${metric(data.totals.averageViewDurationSeconds)}s; avg viewed ${metric(data.totals.averageViewPercentage)}%; subscribers +${metric(data.totals.subscribersGained)} / -${metric(data.totals.subscribersLost)}.`);
+    const ranked = [...data.posts].sort((left, right) => (right.metrics.views ?? -1) - (left.metrics.views ?? -1)).slice(0, 20);
+    if (ranked.length) {
+      lines.push("Posts:");
+      for (const post of ranked) lines.push(`- ${post.title} (${post.publishedAt.slice(0, 10) || "date unavailable"}): views ${metric(post.metrics.views)}, likes ${metric(post.metrics.likes)}, comments ${metric(post.metrics.comments)}, shares ${metric(post.metrics.shares)}, watch ${metric(post.metrics.watchMinutes)} min. Context: ${truncate(post.description.replace(/\s+/gu, " "), 180) || "none"}`);
+      if (data.posts.length > ranked.length) lines.push(`- ${data.posts.length - ranked.length} additional posts are present in the JSON/CSV exports.`);
+    }
+    if (data.missingMetrics.length) lines.push(`Missing metrics: ${data.missingMetrics.join(", ")}.`);
+    lines.push("");
+  }
+  if (snapshot.limitations.length) lines.push("## Limitations", ...snapshot.limitations.map((value) => `- ${value}`));
+  return lines.join("\n");
+}
+
+function analyticsCsv(snapshot: AnalyticsSnapshot): string {
+  const header = ["platform", "account", "post_id", "title", "description", "published_at", "url", "views", "engaged_views", "likes", "comments", "shares", "watch_minutes", "average_view_duration_seconds", "average_view_percentage", "subscribers_gained", "subscribers_lost"];
+  const rows = [header];
+  for (const platform of PLATFORMS) for (const post of snapshot.platforms[platform].posts) rows.push([
+    platform, snapshot.platforms[platform].account ?? "", post.providerPostId, post.title, post.description, post.publishedAt, post.url ?? "",
+    ...[post.metrics.views, post.metrics.engagedViews, post.metrics.likes, post.metrics.comments, post.metrics.shares, post.metrics.watchMinutes, post.metrics.averageViewDurationSeconds, post.metrics.averageViewPercentage, post.metrics.subscribersGained, post.metrics.subscribersLost].map((value) => value === null ? "" : String(value)),
+  ]);
+  return rows.map((row) => row.map(csvCell).join(",")).join("\r\n");
+}
+
+function downloadFile(name: string, content: string, type: string): void {
+  const url = URL.createObjectURL(new Blob([content], { type }));
+  const link = document.createElement("a"); link.href = url; link.download = name; link.click();
+  window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+function trendLabel(points: Array<{ views: number }>): string {
+  if (points.length < 4) return "Insufficient daily data";
+  const recent = points.slice(-3).reduce((sum, point) => sum + point.views, 0);
+  const prior = points.slice(-6, -3).reduce((sum, point) => sum + point.views, 0);
+  if (!prior) return recent ? "Up from zero" : "Flat";
+  const change = ((recent - prior) / prior) * 100;
+  return `${change >= 0 ? "+" : ""}${change.toFixed(1)}% vs prior 3 days`;
+}
+
 async function refreshSystemStatus(): Promise<void> {
   try {
     const status = await api<SystemStatusResponse>("/api/system/status");
@@ -593,17 +805,17 @@ function updateDefaultSettingVisibility(): void { PLATFORMS.forEach((platform) =
 function openPlatformDialog(selection: Selection, action: (value: Selection, tiktokConsent: boolean) => void): void { PLATFORMS.forEach((platform) => { el<HTMLInputElement>(`dialog-${platform}`).checked = selection[platform]; }); el<HTMLInputElement>("dialog-tiktok-consent").checked = false; platformDialogAction = action; el<HTMLDialogElement>("platform-dialog").showModal(); }
 function dialogSelection(): Selection { return Object.fromEntries(PLATFORMS.map((platform) => [platform, el<HTMLInputElement>(`dialog-${platform}`).checked])) as Selection; }
 
-async function inspectVideo(file: File): Promise<{ duration: number; thumbnail: File }> {
+async function inspectVideo(file: File): Promise<{ duration: number; width: number; height: number; thumbnail: File }> {
   return new Promise((resolve, reject) => {
     const video = document.createElement("video"); const url = URL.createObjectURL(file); video.muted = true; video.preload = "metadata";
-    const fail = () => { URL.revokeObjectURL(url); reject(new Error("The browser could not read this MP4.")); };
+    const fail = () => { URL.revokeObjectURL(url); reject(new Error("The browser could not read this MP4 or MOV file.")); };
     video.addEventListener("error", fail, { once: true });
     video.addEventListener("loadedmetadata", () => { if (!Number.isFinite(video.duration) || video.duration <= 0) return fail(); video.currentTime = Math.min(1, Math.max(0, video.duration / 10)); }, { once: true });
     video.addEventListener("seeked", () => {
       const canvas = document.createElement("canvas"); const scale = Math.min(1, 640 / Math.max(video.videoWidth, video.videoHeight));
       canvas.width = Math.max(1, Math.round(video.videoWidth * scale)); canvas.height = Math.max(1, Math.round(video.videoHeight * scale));
       canvas.getContext("2d")?.drawImage(video, 0, 0, canvas.width, canvas.height);
-      canvas.toBlob((blob) => { URL.revokeObjectURL(url); if (!blob) return reject(new Error("Could not create a thumbnail.")); resolve({ duration: video.duration, thumbnail: new File([blob], `${baseName(file.name)}-cover.jpg`, { type: "image/jpeg" }) }); }, "image/jpeg", 0.84);
+      canvas.toBlob((blob) => { URL.revokeObjectURL(url); if (!blob) return reject(new Error("Could not create a thumbnail.")); resolve({ duration: video.duration, width: video.videoWidth, height: video.videoHeight, thumbnail: new File([blob], `${baseName(file.name)}-cover.jpg`, { type: "image/jpeg" }) }); }, "image/jpeg", 0.84);
     }, { once: true });
     video.src = url;
   });
@@ -631,8 +843,8 @@ function input(type: string): HTMLInputElement { const value = document.createEl
 function text<K extends keyof HTMLElementTagNameMap>(tag: K, value: string): HTMLElementTagNameMap[K] { const node = document.createElement(tag); node.textContent = value; return node; }
 function wrap<K extends keyof HTMLElementTagNameMap>(tag: K, className: string, ...children: Node[]): HTMLElementTagNameMap[K] { const node = document.createElement(tag); node.className = className; node.append(...children); return node; }
 function el<T extends HTMLElement>(id: string): T { const value = document.getElementById(id); if (!value) throw new Error(`Missing #${id}`); return value as T; }
-function isMp4(file: File): boolean { return file.type === "video/mp4" && file.name.toLowerCase().endsWith(".mp4"); }
-function baseName(value: string): string { return value.replace(/\.mp4$/iu, ""); }
+function isSupportedVideo(file: File): boolean { return (file.type === "video/mp4" && file.name.toLowerCase().endsWith(".mp4")) || (file.type === "video/quicktime" && file.name.toLowerCase().endsWith(".mov")); }
+function baseName(value: string): string { return value.replace(/\.(?:mp4|mov)$/iu, ""); }
 function applyTemplate(template: string, filename: string): string { return template.replaceAll("{filename}", filename); }
 function humanize(value: string): string { return value.replaceAll("_", " "); }
 function capitalize(value: string): string { return value.charAt(0).toUpperCase() + value.slice(1); }
@@ -641,6 +853,11 @@ function parseJson(value: string): unknown { try { return JSON.parse(value); } c
 function formatBytes(bytes: number): string { if (bytes < 1024) return `${bytes} B`; if (bytes < 1_048_576) return `${(bytes / 1024).toFixed(1)} KB`; if (bytes < 1_073_741_824) return `${(bytes / 1_048_576).toFixed(1)} MB`; return `${(bytes / 1_073_741_824).toFixed(2)} GB`; }
 function formatDuration(seconds: number): string { const value = Math.round(seconds); return `${Math.floor(value / 60)}:${String(value % 60).padStart(2, "0")}`; }
 function formatDate(value: string): string { return new Date(value).toLocaleString(); }
+function dateOnly(value: Date): string { return value.toISOString().slice(0, 10); }
+function metric(value: number | null): string { return value === null ? "—" : new Intl.NumberFormat(undefined, { maximumFractionDigits: value < 100 ? 1 : 0, notation: value >= 1_000_000 ? "compact" : "standard" }).format(value); }
+function sumNullable(...values: Array<number | null>): number | null { const available = values.filter((value): value is number => value !== null); return available.length ? available.reduce((sum, value) => sum + value, 0) : null; }
+function truncate(value: string, length: number): string { return value.length > length ? `${value.slice(0, length - 1)}…` : value; }
+function csvCell(value: string): string { return /[",\r\n]/u.test(value) ? `"${value.replaceAll('"', '""')}"` : value; }
 function toLocal(value: string): string { const date = new Date(value); return new Date(date.getTime() - date.getTimezoneOffset() * 60_000).toISOString().slice(0, 16); }
 function privacyLabel(value: string): string { return ({ PUBLIC_TO_EVERYONE: "Everyone", MUTUAL_FOLLOW_FRIENDS: "Friends", FOLLOWER_OF_CREATOR: "Followers", SELF_ONLY: "Only me" } as Record<string, string>)[value] ?? humanize(value); }
 function setMinimumDates(): void { const min = toLocal(new Date(Date.now() + 120_000).toISOString()); defaultSchedule.min = min; el<HTMLInputElement>("bulk-schedule-time").min = min; }

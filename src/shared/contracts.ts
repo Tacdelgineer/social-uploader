@@ -1,10 +1,10 @@
 export const VIDEO_MAX_BYTES = 2 * 1024 * 1024 * 1024;
 export const THUMBNAIL_MAX_BYTES = 10 * 1024 * 1024;
 export const R2_STORAGE_CAP_BYTES = 8_000_000_000;
-export const INSTAGRAM_VIDEO_MAX_BYTES = 300 * 1024 * 1024;
+export const INSTAGRAM_VIDEO_MAX_BYTES = 1_000_000_000;
 export const INSTAGRAM_COVER_MAX_BYTES = 8 * 1024 * 1024;
 
-export const VIDEO_CONTENT_TYPES = ["video/mp4"] as const;
+export const VIDEO_CONTENT_TYPES = ["video/mp4", "video/quicktime"] as const;
 export const THUMBNAIL_CONTENT_TYPES = ["image/jpeg", "image/png", "image/webp"] as const;
 export const YOUTUBE_THUMBNAIL_CONTENT_TYPES = ["image/jpeg", "image/png"] as const;
 
@@ -358,6 +358,59 @@ export interface SchedulerRun {
 
 export interface YouTubeConnectionStatus {
   connected: boolean;
+  analyticsAvailable?: boolean;
+  requiresAnalyticsReconnect?: boolean;
+}
+
+export interface AnalyticsMetrics {
+  views: number | null;
+  engagedViews: number | null;
+  likes: number | null;
+  comments: number | null;
+  shares: number | null;
+  watchMinutes: number | null;
+  averageViewDurationSeconds: number | null;
+  averageViewPercentage: number | null;
+  subscribersGained: number | null;
+  subscribersLost: number | null;
+}
+
+export interface AnalyticsPost {
+  platform: Platform;
+  providerPostId: string;
+  title: string;
+  description: string;
+  publishedAt: string;
+  url?: string;
+  metrics: AnalyticsMetrics;
+}
+
+export interface AnalyticsTrendPoint {
+  date: string;
+  views: number | null;
+  engagedViews: number | null;
+  likes: number | null;
+  comments: number | null;
+  shares: number | null;
+  watchMinutes: number | null;
+}
+
+export interface PlatformAnalytics {
+  available: boolean;
+  status: "available" | "not_connected" | "additional_permission_required" | "unavailable" | "error";
+  account?: string;
+  message?: string;
+  totals: AnalyticsMetrics;
+  posts: AnalyticsPost[];
+  trend: AnalyticsTrendPoint[];
+  missingMetrics: string[];
+}
+
+export interface AnalyticsSnapshot {
+  generatedAt: string;
+  range: { start: string; end: string; label: string };
+  platforms: Record<Platform, PlatformAnalytics>;
+  limitations: string[];
 }
 
 export interface ApiError {

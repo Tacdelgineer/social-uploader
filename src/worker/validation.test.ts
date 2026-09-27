@@ -19,13 +19,23 @@ describe("upload validation", () => {
     ).not.toBeNull();
   });
 
-  it("rejects invalid types and oversized thumbnails", () => {
+  it("accepts MOV containers and rejects unsupported types and oversized thumbnails", () => {
     expect(
       validatePresignRequest({
         jobId: id,
         retention: "staging",
         files: [
           { kind: "video", fileName: "short.mov", contentType: "video/quicktime", size: 123 },
+          { kind: "thumbnail", fileName: "cover.png", contentType: "image/png", size: 45 },
+        ],
+      }),
+    ).not.toBeNull();
+    expect(
+      validatePresignRequest({
+        jobId: id,
+        retention: "staging",
+        files: [
+          { kind: "video", fileName: "short.avi", contentType: "video/x-msvideo", size: 123 },
           { kind: "thumbnail", fileName: "cover.png", contentType: "image/png", size: 45 },
         ],
       }),
@@ -186,6 +196,33 @@ describe("draft validation", () => {
         new Date("2026-09-23T00:00:00.000Z"),
       ),
     ).not.toBeNull();
+  });
+
+  it("accepts an Instagram-only MOV over 300 MB and enforces the current 1 GB maximum", () => {
+    const instagramMov = {
+      ...validDraft,
+      scheduledAt: null,
+      platforms: { youtube: false, instagram: true, tiktok: false },
+      assets: {
+        video: {
+          key: `uploads/${id}/video.mov`,
+          originalName: "reel.mov",
+          contentType: "video/quicktime",
+          size: 700_000_000,
+        },
+        thumbnail: {
+          key: `uploads/${id}/thumbnail.jpg`,
+          originalName: "cover.jpg",
+          contentType: "image/jpeg",
+          size: 45,
+        },
+      },
+    };
+    expect(validateDraftRequest(instagramMov, new Date("2026-09-23T00:00:00.000Z"))).not.toBeNull();
+    expect(validateDraftRequest({
+      ...instagramMov,
+      assets: { ...instagramMov.assets, video: { ...instagramMov.assets.video, size: 1_000_000_001 } },
+    }, new Date("2026-09-23T00:00:00.000Z"))).toBeNull();
   });
 
   it("accepts scheduled-media object keys", () => {
