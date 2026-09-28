@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { parseAnalyticsRange } from "./analytics";
+import { parseAnalyticsRange, parseIsoDurationSeconds } from "./analytics";
 
 describe("analytics date ranges", () => {
   it("accepts a bounded ISO date range", () => {
@@ -16,5 +16,13 @@ describe("analytics date ranges", () => {
     expect(parseAnalyticsRange(new URL("https://example.test/?start=2026-09-28&end=2026-09-01"), now)).toBeNull();
     expect(parseAnalyticsRange(new URL("https://example.test/?start=2026-09-01&end=2026-10-02"), now)).toBeNull();
     expect(parseAnalyticsRange(new URL("https://example.test/?start=2024-01-01&end=2026-09-01"), now)).toBeNull();
+  });
+});
+
+describe("YouTube durations", () => {
+  it("normalizes ISO 8601 durations to seconds", () => {
+    expect(parseIsoDurationSeconds("PT1H2M3S")).toBe(3723);
+    expect(parseIsoDurationSeconds("PT45S")).toBe(45);
+    expect(parseIsoDurationSeconds(undefined)).toBeNull();
   });
 });

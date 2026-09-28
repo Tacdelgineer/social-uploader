@@ -69,6 +69,8 @@ const drafts: BatchDraft[] = [];
 let posts: ScheduledPostSummary[] = [];
 let analyticsSnapshot: AnalyticsSnapshot | null = null;
 let analyticsRange: "7" | "28" | "90" | "custom" = "7";
+let analyticsSort: "views" | "engagement" | "watch" | "published" = "views";
+let aiSummaryMode: "compact" | "detailed" = "compact";
 let connected: Selection = { youtube: false, instagram: false, tiktok: false };
 let tiktokCreator: TikTokCreatorInfo | null = null;
 let tiktokReview: TikTokReviewStatus | null = null;
@@ -247,9 +249,22 @@ function setupAnalyticsActions(): void {
   el<HTMLInputElement>("analytics-end").addEventListener("change", () => { if (analyticsRange === "custom") void refreshAnalytics(false); });
   el<HTMLButtonElement>("analytics-refresh").addEventListener("click", () => void refreshAnalytics(true));
   el<HTMLButtonElement>("copy-ai").addEventListener("click", () => void copyAnalyticsForAi());
+  el<HTMLButtonElement>("copy-ai-preview").addEventListener("click", () => void copyAnalyticsForAi());
+  el<HTMLButtonElement>("download-ai").addEventListener("click", () => {
+    if (!analyticsSnapshot) return void showToast("Load analytics first.", true);
+    downloadFile(`social-analytics-${analyticsSnapshot.range.end}-${aiSummaryMode}.txt`, analyticsMarkdown(analyticsSnapshot, aiSummaryMode), "text/plain;charset=utf-8");
+  });
+  el<HTMLSelectElement>("ai-summary-mode").addEventListener("change", (event) => {
+    aiSummaryMode = (event.target as HTMLSelectElement).value as typeof aiSummaryMode;
+    if (analyticsSnapshot) el<HTMLElement>("ai-summary-preview").textContent = analyticsMarkdown(analyticsSnapshot, aiSummaryMode);
+  });
+  el<HTMLSelectElement>("analytics-sort").addEventListener("change", (event) => {
+    analyticsSort = (event.target as HTMLSelectElement).value as typeof analyticsSort;
+    if (analyticsSnapshot) renderAnalyticsPosts(PLATFORMS.flatMap((platform) => analyticsSnapshot!.platforms[platform].posts));
+  });
   el<HTMLButtonElement>("export-json").addEventListener("click", () => {
     if (!analyticsSnapshot) return void showToast("Load analytics first.", true);
-    downloadFile(`social-analytics-${analyticsSnapshot.range.end}.json`, JSON.stringify(analyticsSnapshot, null, 2), "application/json");
+    downloadFile(`social-analytics-${analyticsSnapshot.range.end}.json`, JSON.stringify(analyticsJsonExport(analyticsSnapshot), null, 2), "application/json");
   });
   el<HTMLButtonElement>("export-csv").addEventListener("click", () => {
     if (!analyticsSnapshot) return void showToast("Load analytics first.", true);
@@ -626,36 +641,68 @@ function selectedAnalyticsRange(): { start: string; end: string; label: string }
 
 function renderAnalytics(snapshot: AnalyticsSnapshot): void {
   const allPosts: AnalyticsPost[] = [];
-  for (const platform of PLATFORMS) {
-    const data = snapshot.platforms[platform];
-    allPosts.push(...data.posts);
-    const status = el<HTMLElement>(`${platform}-analytics-status`);
-    status.textContent = data.account ? `${data.account} · ${humanize(data.status)}` : humanize(data.status);
-    status.title = data.message ?? "";
-    status.className = `availability ${data.status}`;
-    el<HTMLElement>(`${platform}-analytics-views`).textContent = metric(data.totals.views);
-    el<HTMLElement>(`${platform}-analytics-watch`).textContent = data.totals.watchMinutes === null ? "Unavailable" : `${metric(data.totals.watchMinutes)} min`;
-    el<HTMLElement>(`${platform}-analytics-engagements`).textContent = metric(sumNullable(data.totals.likes, data.totals.comments, data.totals.shares));
-  }
-  const comparablePlatforms = PLATFORMS.filter((platform) => snapshot.platforms[platform].totals.views !== null);
-  const bestPlatform = comparablePlatforms.sort((left, right) => (snapshot.platforms[right].totals.views ?? 0) - (snapshot.platforms[left].totals.views ?? 0))[0];
-  el<HTMLElement>("best-platform").textContent = bestPlatform ? `${capitalize(bestPlatform)} · ${metric(snapshot.platforms[bestPlatform].totals.views)} views` : "Insufficient data";
-  const comparablePosts = allPosts.filter((post) => post.metrics.views !== null).sort((left, right) => (right.metrics.views ?? 0) - (left.metrics.views ?? 0));
-  el<HTMLElement>("best-post").textContent = comparablePosts[0] ? `${truncate(comparablePosts[0].title, 42)} · ${metric(comparablePosts[0].metrics.views)}` : "Insufficient data";
-  const worst = comparablePosts.at(-1);
-  el<HTMLElement>("worst-post").textContent = worst ? `${truncate(worst.title, 42)} · ${metric(worst.metrics.views)}` : "Insufficient data";
+  for (const platform of PLATFORMS) allPosts.push(...snapshot.platforms[platform].posts);
+  renderCombinedTotals(snapshot, allPosts);
+  renderPlatformRows(snapshot);
   const trend = combinedTrend(snapshot);
-  el<HTMLElement>("recent-trend").textContent = trendLabel(trend);
   renderAnalyticsChart(trend);
   renderAnalyticsPosts(allPosts);
-  const limitations = el<HTMLUListElement>("analytics-limitations"); limitations.replaceChildren();
-  const messages = [...snapshot.limitations];
-  for (const platform of PLATFORMS) {
-    const missing = snapshot.platforms[platform].missingMetrics;
-    if (missing.length) messages.push(`${capitalize(platform)} missing: ${missing.join(", ")}.`);
+  renderAvailability(snapshot);
+  el<HTMLElement>("ai-summary-preview").textContent = analyticsMarkdown(snapshot, aiSummaryMode);
+}
+
+function renderCombinedTotals(snapshot: AnalyticsSnapshot, posts: AnalyticsPost[]): void {
+  const host = el<HTMLElement>("analytics-totals"); host.replaceChildren();
+  const totals = PLATFORMS.map((platform) => snapshot.platforms[platform].totals);
+  const values: Array<[string, number | null, string?]> = [
+    ["Total views", sumAvailable(totals.map((value) => value.views))],
+    ["Engagements", sumAvailable(totals.map((value) => sumNullable(value.likes, value.comments, value.shares)))],
+    ["Watch time", sumAvailable(totals.map((value) => value.watchTimeMinutes)), " min"],
+    ["Follower change", netFollowers(totals)],
+    ["Posts", posts.length],
+  ];
+  for (const [label, value, suffix = ""] of values) {
+    const card = wrap("article", "panel analytics-total", text("span", label), text("strong", value === null ? "Unavailable" : `${metric(value)}${suffix}`));
+    if (value === null) card.title = `${label} is not available from the connected provider permissions.`;
+    host.append(card);
   }
-  for (const value of [...new Set(messages)]) limitations.append(text("li", value));
-  if (!limitations.childElementCount) limitations.append(text("li", "All requested metrics are available."));
+}
+
+function renderPlatformRows(snapshot: AnalyticsSnapshot): void {
+  const host = el<HTMLElement>("analytics-platform-rows"); host.replaceChildren();
+  for (const platform of PLATFORMS) {
+    const data = snapshot.platforms[platform];
+    const heading = wrap("div", "platform-summary-heading", text("span", LABELS[platform]), text("strong", capitalize(platform)), text("small", data.account ?? "No connected account"));
+    const status = text("span", humanize(data.status)); status.className = `availability ${data.status}`;
+    const metrics = [
+      ["Views", data.totals.views], ["Likes", data.totals.likes], ["Comments", data.totals.comments], ["Shares", data.totals.shares],
+      ["Watch", data.totals.watchTimeMinutes, "m"], ["Follower change", netFollowers([data.totals])], ["Posts", data.posts.length],
+    ] as Array<[string, number | null, string?]>;
+    const metricHost = wrap("div", "platform-summary-metrics");
+    for (const [label, value, suffix = ""] of metrics) {
+      const item = wrap("div", "", text("span", label), text("strong", value === null ? "—" : `${metric(value)}${suffix}`));
+      if (value === null) item.title = `${label} is unavailable for ${capitalize(platform)}.`;
+      metricHost.append(item);
+    }
+    host.append(wrap("article", "analytics-platform-row", heading, status, metricHost));
+  }
+}
+
+function renderAvailability(snapshot: AnalyticsSnapshot): void {
+  const host = el<HTMLElement>("analytics-availability"); host.replaceChildren();
+  for (const platform of PLATFORMS) {
+    const data = snapshot.platforms[platform];
+    const details = document.createElement("details");
+    const summary = document.createElement("summary");
+    summary.append(text("strong", capitalize(platform)), text("span", humanize(data.status)));
+    const body = wrap("div", "availability-details");
+    if (data.message) body.append(text("p", data.message));
+    if (data.action) body.append(text("p", `Action: ${data.action}`));
+    if (data.missingMetrics.length) body.append(text("p", `Unavailable: ${data.missingMetrics.join(", ")}.`));
+    if (data.technicalDetails) { const raw = document.createElement("details"); raw.append(text("summary", "Technical details"), text("pre", data.technicalDetails)); body.append(raw); }
+    if (!body.childElementCount) body.append(text("p", "All requested metrics are available."));
+    details.append(summary, body); host.append(details);
+  }
 }
 
 function combinedTrend(snapshot: AnalyticsSnapshot): Array<{ date: string; views: number }> {
@@ -692,70 +739,83 @@ function renderAnalyticsChart(points: Array<{ date: string; views: number }>): v
 
 function renderAnalyticsPosts(posts: AnalyticsPost[]): void {
   const body = el<HTMLTableSectionElement>("analytics-posts"); body.replaceChildren();
-  const sorted = [...posts].sort((left, right) => (right.metrics.views ?? -1) - (left.metrics.views ?? -1));
+  const score = (post: AnalyticsPost): number => analyticsSort === "engagement" ? post.metrics.engagementRate ?? -1
+    : analyticsSort === "watch" ? post.metrics.watchTimeMinutes ?? -1
+      : analyticsSort === "published" ? Date.parse(post.publishedAt) || -1 : post.metrics.views ?? -1;
+  const sorted = [...posts].sort((left, right) => score(right) - score(left));
   for (const post of sorted) {
     const row = document.createElement("tr");
+    const preview = document.createElement("td");
+    if (post.thumbnailUrl) { const image = document.createElement("img"); image.src = post.thumbnailUrl; image.alt = ""; image.loading = "lazy"; preview.append(image); }
+    else preview.textContent = "—";
     const titleCell = document.createElement("td");
     if (post.url) { const link = document.createElement("a"); link.href = post.url; link.target = "_blank"; link.rel = "noreferrer"; link.textContent = post.title; titleCell.append(link); }
     else titleCell.textContent = post.title;
-    row.append(text("td", LABELS[post.platform]), titleCell, text("td", post.publishedAt ? new Date(post.publishedAt).toLocaleDateString() : "—"), text("td", metric(post.metrics.views)), text("td", metric(post.metrics.likes)), text("td", metric(post.metrics.comments)), text("td", metric(post.metrics.shares)), text("td", post.metrics.watchMinutes === null ? "—" : `${metric(post.metrics.watchMinutes)}m`));
+    row.append(preview, text("td", LABELS[post.platform]), titleCell, text("td", post.publishedAt ? new Date(post.publishedAt).toLocaleDateString() : "—"), text("td", metric(post.metrics.views)), text("td", metric(post.metrics.likes)), text("td", metric(post.metrics.comments)), text("td", metric(post.metrics.shares)), text("td", post.metrics.watchTimeMinutes === null ? "—" : `${metric(post.metrics.watchTimeMinutes)}m`), text("td", post.metrics.averageViewPercentage === null ? "—" : `${metric(post.metrics.averageViewPercentage)}%`), text("td", post.metrics.engagementRate === null ? "—" : `${post.metrics.engagementRate.toFixed(2)}%`));
     body.append(row);
   }
-  if (!body.childElementCount) { const row = document.createElement("tr"); const cell = text("td", "No posts were returned for this date range."); cell.colSpan = 8; row.append(cell); body.append(row); }
+  if (!body.childElementCount) { const row = document.createElement("tr"); const cell = text("td", "No posts were returned for this date range."); cell.colSpan = 11; row.append(cell); body.append(row); }
 }
 
 async function copyAnalyticsForAi(): Promise<void> {
   if (!analyticsSnapshot) return void showToast("Load analytics first.", true);
-  try { await navigator.clipboard.writeText(analyticsMarkdown(analyticsSnapshot)); showToast("Analytics copied as compact AI-ready Markdown."); }
+  try { await navigator.clipboard.writeText(analyticsMarkdown(analyticsSnapshot, aiSummaryMode)); showToast(`${capitalize(aiSummaryMode)} AI summary copied.`); }
   catch { showToast("The browser blocked clipboard access. Use Export JSON instead.", true); }
 }
 
-function analyticsMarkdown(snapshot: AnalyticsSnapshot): string {
+function analyticsMarkdown(snapshot: AnalyticsSnapshot, mode: "compact" | "detailed"): string {
   const lines = [
     "# Cross-platform content analytics", `Range: ${snapshot.range.start} to ${snapshot.range.end} (${snapshot.range.label})`,
     `Generated: ${snapshot.generatedAt}`, "",
   ];
   for (const platform of PLATFORMS) {
     const data = snapshot.platforms[platform];
-    lines.push(`## ${capitalize(platform)} — ${data.account ?? humanize(data.status)}`);
-    lines.push(`Availability: ${humanize(data.status)}${data.message ? ` — ${data.message}` : ""}`);
-    lines.push(`Totals: views ${metric(data.totals.views)}; engaged views ${metric(data.totals.engagedViews)}; likes ${metric(data.totals.likes)}; comments ${metric(data.totals.comments)}; shares ${metric(data.totals.shares)}; watch minutes ${metric(data.totals.watchMinutes)}; avg view duration ${metric(data.totals.averageViewDurationSeconds)}s; avg viewed ${metric(data.totals.averageViewPercentage)}%; subscribers +${metric(data.totals.subscribersGained)} / -${metric(data.totals.subscribersLost)}.`);
-    const ranked = [...data.posts].sort((left, right) => (right.metrics.views ?? -1) - (left.metrics.views ?? -1)).slice(0, 20);
+    lines.push(`## ${capitalize(platform)} — ${data.account ?? "account unavailable"}`);
+    lines.push(`Availability: ${humanize(data.status)}${data.message ? ` — ${data.message}` : ""}${data.action ? ` Action: ${data.action}` : ""}`);
+    lines.push(`Totals: ${compactMetrics(data.totals)}; posts ${data.posts.length}.`);
+    const ranked = [...data.posts].sort((left, right) => (right.metrics.views ?? -1) - (left.metrics.views ?? -1)).slice(0, mode === "compact" ? 5 : data.posts.length);
     if (ranked.length) {
       lines.push("Posts:");
-      for (const post of ranked) lines.push(`- ${post.title} (${post.publishedAt.slice(0, 10) || "date unavailable"}): views ${metric(post.metrics.views)}, likes ${metric(post.metrics.likes)}, comments ${metric(post.metrics.comments)}, shares ${metric(post.metrics.shares)}, watch ${metric(post.metrics.watchMinutes)} min. Context: ${truncate(post.description.replace(/\s+/gu, " "), 180) || "none"}`);
-      if (data.posts.length > ranked.length) lines.push(`- ${data.posts.length - ranked.length} additional posts are present in the JSON/CSV exports.`);
+      for (const post of ranked) lines.push(`- ${post.title} | ${post.publishedAt.slice(0, 10) || "date unavailable"}${post.durationSeconds === null ? "" : ` | ${Math.round(post.durationSeconds)}s`} | ${compactMetrics(post.metrics)} | Context: ${truncate(post.description.replace(/\s+/gu, " "), mode === "compact" ? 140 : 320) || "none"}`);
+      if (data.posts.length > ranked.length) lines.push(`- ${data.posts.length - ranked.length} more posts omitted in Compact mode.`);
     }
     if (data.missingMetrics.length) lines.push(`Missing metrics: ${data.missingMetrics.join(", ")}.`);
     lines.push("");
   }
-  if (snapshot.limitations.length) lines.push("## Limitations", ...snapshot.limitations.map((value) => `- ${value}`));
+  const limitations = PLATFORMS.flatMap((platform) => {
+    const data = snapshot.platforms[platform];
+    return data.missingMetrics.length ? [`${capitalize(platform)}: unavailable ${data.missingMetrics.join(", ")}.`] : [];
+  });
+  if (limitations.length) lines.push("## Data limitations", ...limitations.map((value) => `- ${value}`));
   return lines.join("\n");
 }
 
 function analyticsCsv(snapshot: AnalyticsSnapshot): string {
-  const header = ["platform", "account", "post_id", "title", "description", "published_at", "url", "views", "engaged_views", "likes", "comments", "shares", "watch_minutes", "average_view_duration_seconds", "average_view_percentage", "subscribers_gained", "subscribers_lost"];
+  const header = ["platform", "account", "post_id", "title", "description", "published_at", "duration_seconds", "views", "engaged_views", "likes", "comments", "shares", "watch_time_minutes", "average_view_duration_seconds", "average_view_percentage", "followers_gained", "followers_lost", "engagement_rate"];
   const rows = [header];
   for (const platform of PLATFORMS) for (const post of snapshot.platforms[platform].posts) rows.push([
-    platform, snapshot.platforms[platform].account ?? "", post.providerPostId, post.title, post.description, post.publishedAt, post.url ?? "",
-    ...[post.metrics.views, post.metrics.engagedViews, post.metrics.likes, post.metrics.comments, post.metrics.shares, post.metrics.watchMinutes, post.metrics.averageViewDurationSeconds, post.metrics.averageViewPercentage, post.metrics.subscribersGained, post.metrics.subscribersLost].map((value) => value === null ? "" : String(value)),
+    platform, snapshot.platforms[platform].account ?? "", post.postId, post.title, post.description, post.publishedAt, post.durationSeconds === null ? "" : String(post.durationSeconds),
+    ...[post.metrics.views, post.metrics.engagedViews, post.metrics.likes, post.metrics.comments, post.metrics.shares, post.metrics.watchTimeMinutes, post.metrics.averageViewDurationSeconds, post.metrics.averageViewPercentage, post.metrics.followersGained, post.metrics.followersLost, post.metrics.engagementRate].map((value) => value === null ? "" : String(value)),
   ]);
   return rows.map((row) => row.map(csvCell).join(",")).join("\r\n");
+}
+
+function analyticsJsonExport(snapshot: AnalyticsSnapshot): AnalyticsSnapshot {
+  return {
+    generatedAt: snapshot.generatedAt,
+    range: snapshot.range,
+    limitations: snapshot.limitations,
+    platforms: Object.fromEntries(PLATFORMS.map((platform) => {
+      const { technicalDetails: _technicalDetails, ...safe } = snapshot.platforms[platform];
+      return [platform, safe];
+    })) as AnalyticsSnapshot["platforms"],
+  };
 }
 
 function downloadFile(name: string, content: string, type: string): void {
   const url = URL.createObjectURL(new Blob([content], { type }));
   const link = document.createElement("a"); link.href = url; link.download = name; link.click();
   window.setTimeout(() => URL.revokeObjectURL(url), 1000);
-}
-
-function trendLabel(points: Array<{ views: number }>): string {
-  if (points.length < 4) return "Insufficient daily data";
-  const recent = points.slice(-3).reduce((sum, point) => sum + point.views, 0);
-  const prior = points.slice(-6, -3).reduce((sum, point) => sum + point.views, 0);
-  if (!prior) return recent ? "Up from zero" : "Flat";
-  const change = ((recent - prior) / prior) * 100;
-  return `${change >= 0 ? "+" : ""}${change.toFixed(1)}% vs prior 3 days`;
 }
 
 async function refreshSystemStatus(): Promise<void> {
@@ -856,6 +916,20 @@ function formatDate(value: string): string { return new Date(value).toLocaleStri
 function dateOnly(value: Date): string { return value.toISOString().slice(0, 10); }
 function metric(value: number | null): string { return value === null ? "—" : new Intl.NumberFormat(undefined, { maximumFractionDigits: value < 100 ? 1 : 0, notation: value >= 1_000_000 ? "compact" : "standard" }).format(value); }
 function sumNullable(...values: Array<number | null>): number | null { const available = values.filter((value): value is number => value !== null); return available.length ? available.reduce((sum, value) => sum + value, 0) : null; }
+function sumAvailable(values: Array<number | null>): number | null { const available = values.filter((value): value is number => value !== null); return available.length ? available.reduce((sum, value) => sum + value, 0) : null; }
+function netFollowers(values: Array<{ followersGained: number | null; followersLost: number | null }>): number | null {
+  const available = values.filter((value) => value.followersGained !== null && value.followersLost !== null);
+  return available.length ? available.reduce((sum, value) => sum + value.followersGained! - value.followersLost!, 0) : null;
+}
+function compactMetrics(value: AnalyticsPost["metrics"]): string {
+  const fields: Array<[string, number | null, string?]> = [
+    ["views", value.views], ["engaged views", value.engagedViews], ["likes", value.likes], ["comments", value.comments], ["shares", value.shares],
+    ["watch min", value.watchTimeMinutes], ["avg view sec", value.averageViewDurationSeconds], ["avg viewed", value.averageViewPercentage, "%"],
+    ["followers gained", value.followersGained], ["followers lost", value.followersLost], ["engagement rate", value.engagementRate, "%"],
+  ];
+  const present = fields.filter(([, item]) => item !== null).map(([label, item, suffix = ""]) => `${label} ${metric(item)}${suffix}`);
+  return present.length ? present.join("; ") : "metrics unavailable";
+}
 function truncate(value: string, length: number): string { return value.length > length ? `${value.slice(0, length - 1)}…` : value; }
 function csvCell(value: string): string { return /[",\r\n]/u.test(value) ? `"${value.replaceAll('"', '""')}"` : value; }
 function toLocal(value: string): string { const date = new Date(value); return new Date(date.getTime() - date.getTimezoneOffset() * 60_000).toISOString().slice(0, 16); }

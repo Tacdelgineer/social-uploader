@@ -29,6 +29,7 @@ interface InstagramMedia {
   timestamp?: string;
   like_count?: number;
   comments_count?: number;
+  thumbnail_url?: string;
 }
 interface TikTokVideo {
   id: string;
@@ -40,6 +41,8 @@ interface TikTokVideo {
   like_count?: number;
   comment_count?: number;
   share_count?: number;
+  duration?: number;
+  cover_image_url?: string;
 }
 
 export async function getAnalyticsSnapshot(
@@ -48,7 +51,7 @@ export async function getAnalyticsSnapshot(
   refresh = false,
 ): Promise<AnalyticsSnapshot> {
   validateRange(range);
-  const cacheKey = `analytics:v1:${range.start}:${range.end}`;
+  const cacheKey = `analytics:v2:${range.start}:${range.end}`;
   if (!refresh) {
     const cached = await env.METADATA.get<AnalyticsSnapshot>(cacheKey, "json");
     if (cached) return cached;
@@ -65,7 +68,7 @@ export async function getAnalyticsSnapshot(
     const result = results[index]!;
     platforms[platform] = result.status === "fulfilled"
       ? result.value
-      : unavailableFromError(result.reason);
+      : unavailableFromError(platform, result.reason);
     if (platforms[platform].message) limitations.push(`${capitalize(platform)}: ${platforms[platform].message}`);
   }
   const snapshot: AnalyticsSnapshot = {
@@ -94,10 +97,12 @@ async function getYouTubeAnalytics(env: Env, range: RangeInput): Promise<Platfor
   try { accessToken = await getYouTubeAnalyticsAccessToken(env); }
   catch (error) {
     const detail = errorMessage(error);
+    if (detail.includes("Reconnect YouTube")) return platformUnavailable(
+      "additional_permission_required", "YouTube needs a one-time reconnect for analytics access.", allMetricNames(), undefined,
+      "Analytics → Reconnect YouTube to grant youtube.readonly and yt-analytics.readonly.", detail,
+    );
     return platformUnavailable(
-      detail.includes("Reconnect YouTube") ? "additional_permission_required" : "not_connected",
-      detail,
-      allMetricNames(),
+      "not_connected", "YouTube is not connected.", allMetricNames(), undefined, undefined, detail,
     );
   }
 
@@ -115,10 +120,11 @@ async function getYouTubeAnalytics(env: Env, range: RangeInput): Promise<Platfor
     const id = String(row.video ?? "");
     const snippet = details.get(id);
     return {
-      platform: "youtube", providerPostId: id, title: snippet?.title ?? id,
+      platform: "youtube", postId: id, title: snippet?.title ?? id,
       description: snippet?.description ?? "", publishedAt: snippet?.publishedAt ?? "",
+      durationSeconds: snippet?.durationSeconds ?? null, thumbnailUrl: snippet?.thumbnailUrl,
       url: `https://www.youtube.com/watch?v=${encodeURIComponent(id)}`,
-      metrics: metricsFromYouTubeRow(row),
+      metrics: withEngagementRate(metricsFromYouTubeRow(row)),
     };
   });
   const totalsRow = reportRows(totalsReport)[0] ?? {};
@@ -129,7 +135,7 @@ async function getYouTubeAnalytics(env: Env, range: RangeInput): Promise<Platfor
   }));
   return {
     available: true, status: "available", account: channelPayload.items?.[0]?.snippet?.title ?? "YouTube channel",
-    totals: metricsFromYouTubeRow(totalsRow), posts, trend, missingMetrics: [...new Set(missing)],
+    totals: withEngagementRate(metricsFromYouTubeRow(totalsRow)), posts, trend, missingMetrics: [...new Set(missing)],
   };
 }
 
@@ -164,13 +170,17 @@ async function queryYouTubeAnalytics(
 async function getYouTubeVideoDetails(
   accessToken: string,
   ids: string[],
-): Promise<Map<string, { title: string; description: string; publishedAt: string }>> {
-  const result = new Map<string, { title: string; description: string; publishedAt: string }>();
+): Promise<Map<string, { title: string; description: string; publishedAt: string; durationSeconds: number | null; thumbnailUrl?: string }>> {
+  const result = new Map<string, { title: string; description: string; publishedAt: string; durationSeconds: number | null; thumbnailUrl?: string }>();
   for (let index = 0; index < ids.length; index += 50) {
     const url = new URL("https://www.googleapis.com/youtube/v3/videos");
-    url.search = new URLSearchParams({ part: "snippet", id: ids.slice(index, index + 50).join(",") }).toString();
-    const payload = await providerJson<{ items?: Array<{ id: string; snippet?: { title?: string; description?: string; publishedAt?: string } }> }>(url, accessToken);
-    for (const item of payload.items ?? []) result.set(item.id, { title: item.snippet?.title ?? item.id, description: item.snippet?.description ?? "", publishedAt: item.snippet?.publishedAt ?? "" });
+    url.search = new URLSearchParams({ part: "snippet,contentDetails", id: ids.slice(index, index + 50).join(",") }).toString();
+    const payload = await providerJson<{ items?: Array<{ id: string; snippet?: { title?: string; description?: string; publishedAt?: string; thumbnails?: { medium?: { url?: string }; default?: { url?: string } } }; contentDetails?: { duration?: string } }> }>(url, accessToken);
+    for (const item of payload.items ?? []) result.set(item.id, {
+      title: item.snippet?.title ?? item.id, description: item.snippet?.description ?? "", publishedAt: item.snippet?.publishedAt ?? "",
+      durationSeconds: parseIsoDurationSeconds(item.contentDetails?.duration),
+      thumbnailUrl: item.snippet?.thumbnails?.medium?.url ?? item.snippet?.thumbnails?.default?.url,
+    });
   }
   return result;
 }
@@ -178,9 +188,9 @@ async function getYouTubeVideoDetails(
 async function getInstagramAnalytics(env: Env, range: RangeInput): Promise<PlatformAnalytics> {
   let credentials;
   try { credentials = await getInstagramCredentials(env); }
-  catch (error) { return platformUnavailable("not_connected", errorMessage(error), allMetricNames()); }
+  catch (error) { return platformUnavailable("not_connected", "Instagram is not connected.", allMetricNames(), undefined, undefined, errorMessage(error)); }
   const hasInsights = credentials.permissions.includes("instagram_business_manage_insights");
-  const fields = "id,caption,media_type,media_product_type,permalink,timestamp,like_count,comments_count";
+  const fields = "id,caption,media_type,media_product_type,permalink,timestamp,like_count,comments_count,thumbnail_url";
   const url = new URL(`https://graph.instagram.com/v26.0/${encodeURIComponent(credentials.userId)}/media`);
   url.search = new URLSearchParams({ fields, limit: "100" }).toString();
   const payload = await providerJson<{ data?: InstagramMedia[] }>(url, credentials.accessToken);
@@ -189,24 +199,25 @@ async function getInstagramAnalytics(env: Env, range: RangeInput): Promise<Platf
     if (!media.timestamp || media.timestamp.slice(0, 10) < range.start || media.timestamp.slice(0, 10) > range.end) continue;
     const insights = hasInsights ? await getInstagramMediaInsights(media.id, credentials.accessToken) : {};
     posts.push({
-      platform: "instagram", providerPostId: media.id,
+      platform: "instagram", postId: media.id,
       title: firstLine(media.caption) || `${media.media_product_type ?? media.media_type ?? "Instagram"} post`,
-      description: media.caption ?? "", publishedAt: media.timestamp, url: media.permalink,
-      metrics: {
+      description: media.caption ?? "", publishedAt: media.timestamp, durationSeconds: null, thumbnailUrl: media.thumbnail_url, url: media.permalink,
+      metrics: withEngagementRate({
         ...emptyMetrics(), views: numeric(insights.views), likes: numeric(insights.likes) ?? media.like_count ?? null,
         comments: numeric(insights.comments) ?? media.comments_count ?? null, shares: numeric(insights.shares),
-        watchMinutes: numeric(insights.ig_reels_video_view_total_time) === null ? null : Number(insights.ig_reels_video_view_total_time) / 60_000,
+        watchTimeMinutes: numeric(insights.ig_reels_video_view_total_time) === null ? null : Number(insights.ig_reels_video_view_total_time) / 60_000,
         averageViewDurationSeconds: numeric(insights.ig_reels_avg_watch_time) === null ? null : Number(insights.ig_reels_avg_watch_time) / 1000,
-      },
+      }),
     });
   }
-  const missing = ["engagedViews", "averageViewPercentage", "subscribersGained", "subscribersLost"];
-  if (!hasInsights) missing.push("views", "shares", "watchMinutes", "averageViewDurationSeconds");
+  const missing = ["engagedViews", "averageViewPercentage", "followersGained", "followersLost", "durationSeconds"];
+  if (!hasInsights) missing.push("views", "shares", "watchTimeMinutes", "averageViewDurationSeconds");
   return {
     available: true, status: hasInsights ? "available" : "additional_permission_required",
     account: credentials.username ? `@${credentials.username}` : "Instagram account",
-    message: hasInsights ? "Metrics are current per-post totals for posts published in the selected range."
-      : "Basic owned-media data is available. Add Advanced Access for instagram_business_manage_insights in Meta App Dashboard, then reconnect Instagram for Reel views, shares, and watch metrics.",
+    message: hasInsights ? "Owned-media metrics are current per-post totals for posts published in the selected range."
+      : "Basic owned-media data is available; deeper Reel insights need an additional permission.",
+    action: hasInsights ? undefined : "Get Advanced Access for instagram_business_manage_insights in Meta App Dashboard, then reconnect Instagram.",
     totals: sumPostMetrics(posts), posts, trend: [], missingMetrics: missing,
   };
 }
@@ -223,20 +234,31 @@ async function getInstagramMediaInsights(mediaId: string, accessToken: string): 
 async function getTikTokAnalytics(env: Env, range: RangeInput): Promise<PlatformAnalytics> {
   let credentials;
   try { credentials = await getTikTokCredentials(env); }
-  catch (error) { return platformUnavailable("not_connected", errorMessage(error), allMetricNames()); }
+  catch (error) { return platformUnavailable("not_connected", "TikTok is not connected.", allMetricNames(), undefined, undefined, errorMessage(error)); }
   if (!new Set(credentials.scope.split(",").map((value) => value.trim())).has("video.list")) {
     return platformUnavailable(
       "additional_permission_required",
-      "In TikTok Developer Portal, open this app, add the Display API video.list scope under Scopes, submit/complete approval if prompted, then reconnect TikTok.",
-      ["views", "likes", "comments", "shares", "watchMinutes", "averageViewDurationSeconds", "averageViewPercentage", "subscribersGained", "subscribersLost", "engagedViews"],
+      "Additional permission required.",
+      ["views", "likes", "comments", "shares", "watchTimeMinutes", "averageViewDurationSeconds", "averageViewPercentage", "followersGained", "followersLost", "engagedViews"],
       credentials.displayName,
+      "Enable Display API + video.list in TikTok Developer Portal, then reconnect TikTok.",
     );
+  }
+  const scopes = new Set(credentials.scope.split(",").map((value) => value.trim()));
+  let followerCount: number | null = null;
+  if (scopes.has("user.info.stats")) {
+    try {
+      const userUrl = new URL("https://open.tiktokapis.com/v2/user/info/");
+      userUrl.searchParams.set("fields", "display_name,follower_count,following_count,likes_count,video_count");
+      const user = await providerJson<{ data?: { user?: { follower_count?: number } } }>(userUrl, credentials.accessToken);
+      followerCount = user.data?.user?.follower_count ?? null;
+    } catch { /* Stats are optional and never block owned-video analytics. */ }
   }
   const posts: AnalyticsPost[] = [];
   let cursor: number | undefined;
   for (let page = 0; page < 5; page += 1) {
     const url = new URL("https://open.tiktokapis.com/v2/video/list/");
-    url.searchParams.set("fields", "id,title,video_description,create_time,share_url,view_count,like_count,comment_count,share_count");
+    url.searchParams.set("fields", "id,title,video_description,create_time,share_url,duration,cover_image_url,view_count,like_count,comment_count,share_count");
     const response = await fetch(url, {
       method: "POST", headers: { authorization: `Bearer ${credentials.accessToken}`, "content-type": "application/json" },
       body: JSON.stringify({ max_count: 20, ...(cursor ? { cursor } : {}) }),
@@ -248,9 +270,9 @@ async function getTikTokAnalytics(env: Env, range: RangeInput): Promise<Platform
       const publishedAt = video.create_time ? new Date(video.create_time * 1000).toISOString() : "";
       if (publishedAt.slice(0, 10) < range.start || publishedAt.slice(0, 10) > range.end) continue;
       posts.push({
-        platform: "tiktok", providerPostId: video.id, title: video.title || firstLine(video.video_description) || video.id,
-        description: video.video_description ?? "", publishedAt, url: video.share_url,
-        metrics: { ...emptyMetrics(), views: video.view_count ?? null, likes: video.like_count ?? null, comments: video.comment_count ?? null, shares: video.share_count ?? null },
+        platform: "tiktok", postId: video.id, title: video.title || firstLine(video.video_description) || video.id,
+        description: video.video_description ?? "", publishedAt, durationSeconds: video.duration ?? null, thumbnailUrl: video.cover_image_url, url: video.share_url,
+        metrics: withEngagementRate({ ...emptyMetrics(), views: video.view_count ?? null, likes: video.like_count ?? null, comments: video.comment_count ?? null, shares: video.share_count ?? null }),
       });
     }
     if (!payload.data?.has_more || !payload.data.cursor || videos.some((video) => video.create_time && new Date(video.create_time * 1000).toISOString().slice(0, 10) < range.start)) break;
@@ -259,8 +281,8 @@ async function getTikTokAnalytics(env: Env, range: RangeInput): Promise<Platform
   return {
     available: true, status: "available", account: credentials.displayName ?? "TikTok account",
     message: "Display API metrics are current lifetime totals for public videos created in the selected range; daily historical performance is unavailable.",
-    totals: sumPostMetrics(posts), posts, trend: [],
-    missingMetrics: ["engagedViews", "watchMinutes", "averageViewDurationSeconds", "averageViewPercentage", "subscribersGained", "subscribersLost"],
+    followerCount, totals: sumPostMetrics(posts), posts, trend: [],
+    missingMetrics: ["engagedViews", "watchTimeMinutes", "averageViewDurationSeconds", "averageViewPercentage", "followersGained", "followersLost"],
   };
 }
 
@@ -272,31 +294,46 @@ function reportRows(report: YouTubeReport): Array<Record<string, string | number
 function metricsFromYouTubeRow(row: Record<string, string | number>): AnalyticsMetrics {
   return {
     views: numeric(row.views), engagedViews: numeric(row.engagedViews), likes: numeric(row.likes),
-    comments: numeric(row.comments), shares: numeric(row.shares), watchMinutes: numeric(row.estimatedMinutesWatched),
+    comments: numeric(row.comments), shares: numeric(row.shares), watchTimeMinutes: numeric(row.estimatedMinutesWatched),
     averageViewDurationSeconds: numeric(row.averageViewDuration), averageViewPercentage: numeric(row.averageViewPercentage),
-    subscribersGained: numeric(row.subscribersGained), subscribersLost: numeric(row.subscribersLost),
+    followersGained: numeric(row.subscribersGained), followersLost: numeric(row.subscribersLost), engagementRate: null,
   };
 }
 
 function sumPostMetrics(posts: AnalyticsPost[]): AnalyticsMetrics {
   const total = emptyMetrics();
-  for (const key of ["views", "engagedViews", "likes", "comments", "shares", "watchMinutes", "subscribersGained", "subscribersLost"] as const) {
+  for (const key of ["views", "engagedViews", "likes", "comments", "shares", "watchTimeMinutes", "followersGained", "followersLost"] as const) {
     const values = posts.map((post) => post.metrics[key]).filter((value): value is number => value !== null);
     total[key] = values.length ? values.reduce((sum, value) => sum + value, 0) : null;
   }
-  const weightedViews = posts.reduce((sum, post) => sum + (post.metrics.views ?? 0), 0);
   for (const key of ["averageViewDurationSeconds", "averageViewPercentage"] as const) {
     const usable = posts.filter((post) => post.metrics[key] !== null);
-    total[key] = usable.length ? usable.reduce((sum, post) => sum + post.metrics[key]! * Math.max(1, post.metrics.views ?? 1), 0) / Math.max(1, weightedViews) : null;
+    const weightedViews = usable.reduce((sum, post) => sum + Math.max(1, post.metrics.views ?? 1), 0);
+    total[key] = usable.length ? usable.reduce((sum, post) => sum + post.metrics[key]! * Math.max(1, post.metrics.views ?? 1), 0) / weightedViews : null;
   }
-  return total;
+  return withEngagementRate(total);
 }
 
-function platformUnavailable(status: PlatformAnalytics["status"], message: string, missingMetrics: string[], account?: string): PlatformAnalytics {
-  return { available: false, status, account, message, totals: emptyMetrics(), posts: [], trend: [], missingMetrics };
+function platformUnavailable(status: PlatformAnalytics["status"], message: string, missingMetrics: string[], account?: string, action?: string, technicalDetails?: string): PlatformAnalytics {
+  return { available: false, status, account, message, action, technicalDetails, totals: emptyMetrics(), posts: [], trend: [], missingMetrics };
 }
-function unavailableFromError(error: unknown): PlatformAnalytics { return platformUnavailable("error", errorMessage(error), allMetricNames()); }
-function emptyMetrics(): AnalyticsMetrics { return { views: null, engagedViews: null, likes: null, comments: null, shares: null, watchMinutes: null, averageViewDurationSeconds: null, averageViewPercentage: null, subscribersGained: null, subscribersLost: null }; }
+function unavailableFromError(platform: Platform, error: unknown): PlatformAnalytics {
+  const detail = errorMessage(error);
+  if (platform === "youtube" && /youtube analytics api|accessnotconfigured|has not been used|disabled/i.test(detail)) {
+    return platformUnavailable("unavailable", "YouTube Analytics API is not enabled.", allMetricNames(), undefined, "Google Cloud Console → existing project → APIs & Services → Library → enable YouTube Analytics API; then Analytics → Reconnect YouTube.", detail);
+  }
+  return platformUnavailable("error", "Provider analytics request failed.", allMetricNames(), undefined, undefined, detail);
+}
+function emptyMetrics(): AnalyticsMetrics { return { views: null, engagedViews: null, likes: null, comments: null, shares: null, watchTimeMinutes: null, averageViewDurationSeconds: null, averageViewPercentage: null, followersGained: null, followersLost: null, engagementRate: null }; }
+function withEngagementRate(metrics: AnalyticsMetrics): AnalyticsMetrics {
+  const { views, likes, comments, shares } = metrics;
+  return { ...metrics, engagementRate: views !== null && views > 0 && likes !== null && comments !== null && shares !== null ? ((likes + comments + shares) / views) * 100 : null };
+}
+export function parseIsoDurationSeconds(value?: string): number | null {
+  const match = value?.match(/^P(?:(\d+(?:\.\d+)?)D)?(?:T(?:(\d+(?:\.\d+)?)H)?(?:(\d+(?:\.\d+)?)M)?(?:(\d+(?:\.\d+)?)S)?)?$/u);
+  if (!match) return null;
+  return Number(match[1] ?? 0) * 86400 + Number(match[2] ?? 0) * 3600 + Number(match[3] ?? 0) * 60 + Number(match[4] ?? 0);
+}
 function allMetricNames(): string[] { return Object.keys(emptyMetrics()); }
 function numeric(value: unknown): number | null { const number = typeof value === "number" ? value : typeof value === "string" && value !== "" ? Number(value) : NaN; return Number.isFinite(number) ? number : null; }
 function firstLine(value?: string): string { return (value ?? "").split(/\r?\n/u)[0]?.slice(0, 100) ?? ""; }

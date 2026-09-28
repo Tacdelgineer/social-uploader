@@ -368,19 +368,22 @@ export interface AnalyticsMetrics {
   likes: number | null;
   comments: number | null;
   shares: number | null;
-  watchMinutes: number | null;
+  watchTimeMinutes: number | null;
   averageViewDurationSeconds: number | null;
   averageViewPercentage: number | null;
-  subscribersGained: number | null;
-  subscribersLost: number | null;
+  followersGained: number | null;
+  followersLost: number | null;
+  engagementRate: number | null;
 }
 
 export interface AnalyticsPost {
   platform: Platform;
-  providerPostId: string;
+  postId: string;
   title: string;
   description: string;
   publishedAt: string;
+  durationSeconds: number | null;
+  thumbnailUrl?: string;
   url?: string;
   metrics: AnalyticsMetrics;
 }
@@ -400,6 +403,9 @@ export interface PlatformAnalytics {
   status: "available" | "not_connected" | "additional_permission_required" | "unavailable" | "error";
   account?: string;
   message?: string;
+  action?: string;
+  technicalDetails?: string;
+  followerCount?: number | null;
   totals: AnalyticsMetrics;
   posts: AnalyticsPost[];
   trend: AnalyticsTrendPoint[];
